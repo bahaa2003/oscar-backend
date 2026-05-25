@@ -13,6 +13,7 @@ const {
 const { createAuditLog } = require('../audit/audit.service');
 const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 const { notifyNewDeposit, notifyDepositApproved, notifyDepositRejected } = require('../notifications/notification.service');
+const whatsappService = require('../whatsapp/whatsapp.service');
 
 const safeParseJson = (value) => {
     if (typeof value !== 'string') return null;
@@ -108,7 +109,7 @@ const createDepositRequest = async ({
     auditContext = null,
 }) => {
     // Confirm user exists (belt-and-suspenders — middleware already checks ACTIVE)
-    const user = await User.findById(userId).select('_id role');
+    const user = await User.findById(userId).select('_id role name email');
     if (!user) throw new NotFoundError('User');
 
     const deposit = await DepositRequest.create({
@@ -145,6 +146,16 @@ const createDepositRequest = async ({
     });
 
     notifyNewDeposit(deposit);
+
+    try {
+        whatsappService.sendAdminNotification(
+            `💰 *طلب شحن رصيد!*\nالمستخدم: ${user.name || user.email || userId}\nالمبلغ: ${deposit.requestedAmount} ${deposit.currency}\nوسيلة الدفع: ${paymentMethodId}`
+        ).catch((err) => {
+            console.error('WhatsApp Notification failed:', err.message);
+        });
+    } catch (err) {
+        console.error('WhatsApp Notification failed:', err.message);
+    }
 
     return deposit;
 };

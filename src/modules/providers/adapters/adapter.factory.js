@@ -33,6 +33,7 @@ const { MockProviderAdapter } = require('./mock.adapter');
 const { RoyalCrownAdapter } = require('./royalCrown.adapter');
 const { TorosfonAdapter } = require('./toros.adapter');
 const { AlkasrVipAdapter } = require('./alkasr.adapter');
+const { IbraAdapter } = require('./ibra.adapter');
 
 // ─── Registry ────────────────────────────────────────────────────────────────
 //
@@ -67,6 +68,11 @@ const registry = new Map([
     ['miral-store', AlkasrVipAdapter], // slug
     ['miral store', AlkasrVipAdapter], // name
     ['miralstore', AlkasrVipAdapter],  // compact
+
+    // -- Ibra Store ------------------------------------------------------------
+    ['ibra-store', IbraAdapter],
+    ['ibrastore', IbraAdapter],
+    ['ibra', IbraAdapter],
 
 
     // ── Default test / dev adapter ────────────────────────────────────────────

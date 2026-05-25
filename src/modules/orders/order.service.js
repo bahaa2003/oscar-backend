@@ -29,6 +29,7 @@ const Group = require('../groups/group.model');
 const { getLivePrice, invalidate: invalidatePriceCache } = require('../providers/providerPriceCache');
 const { toDecimal, toStr, toFiat, multiply, subtract, add, isPositive, compare } = require('../../shared/utils/decimalPrecision');
 const { notifyNewManualOrder, notifyOrderCompleted, notifyOrderFailed } = require('../notifications/notification.service');
+const whatsappService = require('../whatsapp/whatsapp.service');
 
 const TRANSACTION_UNSUPPORTED_PATTERN = /Transaction numbers are only allowed|replica set member|mongos|transaction.*not supported/i;
 const ORDER_NUMBER_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -92,6 +93,24 @@ const endSessionQuietly = (session) => {
         session?.endSession?.();
     } catch (_) {
         // already ended
+    }
+};
+
+const notifyAdminOrderCreated = ({ order, userId, productName, quantity }) => {
+    try {
+        (async () => {
+            const user = await User.findById(userId).select('name email').lean();
+            const orderRef = order?.displayId || order?.orderNumber || order?._id;
+            const userName = user?.name || user?.email || userId;
+
+            await whatsappService.sendAdminNotification(
+                `📦 *طلب جديد!*\nرقم: ${orderRef}\nالمستخدم: ${userName}\nالمنتج: ${productName}\nالكمية: ${quantity}`
+            );
+        })().catch((err) => {
+            console.error('WhatsApp Notification failed:', err.message);
+        });
+    } catch (err) {
+        console.error('WhatsApp Notification failed:', err.message);
     }
 };
 
@@ -723,6 +742,13 @@ const _attemptCreateOrder = async (
                 notifyNewManualOrder(order);
             }
 
+            notifyAdminOrderCreated({
+                order,
+                userId,
+                productName: product.name,
+                quantity: qty,
+            });
+
             if (isAutomatic) {
                 createAuditLog({
                     actorId: auditContext?.actorId ?? userId,
@@ -950,6 +976,13 @@ const _attemptCreateOrder = async (
         if (!isAutomatic) {
             notifyNewManualOrder(order);
         }
+
+        notifyAdminOrderCreated({
+            order,
+            userId,
+            productName: product.name,
+            quantity: qty,
+        });
 
         if (isAutomatic) {
             createAuditLog({

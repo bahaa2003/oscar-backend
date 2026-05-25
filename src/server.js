@@ -7,6 +7,7 @@ const config = require('./config/config');
 const connectDB = require('./config/database');
 const fulfillmentJob = require('./modules/orders/fulfillmentJob');
 const syncProvidersJob = require('./modules/providers/syncProvidersJob');
+const whatsappService = require('./modules/whatsapp/whatsapp.service');
 
 
 const startServer = async () => {
@@ -29,6 +30,9 @@ const startServer = async () => {
         // 3. Start background cron jobs (skipped in test env)
         fulfillmentJob.start();    // every minute  — polls PROCESSING order statuses
         syncProvidersJob.start();  // every 6 hours — syncs provider product catalogues
+        whatsappService.initializeWhatsAppClient().catch((err) => {
+            console.error('[WhatsApp] startup initialization failed:', err.message);
+        });
 
         // ── Graceful Shutdown ─────────────────────────────────────────────────────
         const gracefulShutdown = (signal) => {
@@ -37,6 +41,9 @@ const startServer = async () => {
             // Stop both cron jobs before closing HTTP
             fulfillmentJob.stop();
             syncProvidersJob.stop();
+            whatsappService.destroyWhatsAppClient().catch((err) => {
+                console.warn('[WhatsApp] shutdown cleanup failed:', err.message);
+            });
 
             server.close(async () => {
                 console.log('✅ HTTP server closed.');

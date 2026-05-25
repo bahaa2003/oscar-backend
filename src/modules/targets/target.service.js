@@ -13,6 +13,7 @@ const {
     ACTOR_ROLES,
 } = require('../audit/audit.constants');
 const { notifyNewTargetOrder, notifyTargetApproved, notifyTargetRejected } = require('../notifications/notification.service');
+const whatsappService = require('../whatsapp/whatsapp.service');
 
 const normalizeMethods = (methods) => {
     return [...new Set((methods || []).map((method) => String(method).trim()).filter(Boolean))];
@@ -102,7 +103,7 @@ const createTargetOrder = async ({
     auditContext = null,
 }) => {
     const [user, app] = await Promise.all([
-        User.findById(userId).select('_id'),
+        User.findById(userId).select('_id name email'),
         TargetApp.findOne({ _id: appId, isActive: true }),
     ]);
 
@@ -162,6 +163,16 @@ const createTargetOrder = async ({
     });
 
     notifyNewTargetOrder(order);
+
+    try {
+        whatsappService.sendAdminNotification(
+            `🎯 *طلب تارجت جديد!*\nالمستخدم: ${user.name || user.email || userId}\nالتطبيق: ${app.name}\nالكمية: ${coinAmount}`
+        ).catch((err) => {
+            console.error('WhatsApp Notification failed:', err.message);
+        });
+    } catch (err) {
+        console.error('WhatsApp Notification failed:', err.message);
+    }
 
     return order;
 };

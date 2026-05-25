@@ -29,6 +29,7 @@ const meRoutes = require('./modules/me/me.routes');          // ← user panel
 const targetRoutes = require('./modules/targets/target.routes'); // ← target coin purchases
 const notificationRoutes = require('./modules/notifications/notification.routes'); // ← notifications
 const currencyRoutes = require('./modules/currency/currency.routes');
+const whatsappRoutes = require('./modules/whatsapp/whatsapp.routes');
 const uploadRoutes = require('./shared/routes/upload.routes');
 const path = require('path');
 // Seed default settings on startup (idempotent, no-op if already seeded)
@@ -203,6 +204,7 @@ app.get(`${API_PREFIX}/public/catalog`, async (req, res) => {
 app.use(`${API_PREFIX}/admin`, adminRoutes);
 app.use(`${API_PREFIX}/admin`, adminCatalogRoutes);
 app.use(`${API_PREFIX}/admin/currencies`, currencyRoutes);
+app.use(`${API_PREFIX}/admin/whatsapp`, whatsappRoutes);
 
 // ── Generic Upload ────────────────────────────────────────────────────────────
 app.use(`${API_PREFIX}/upload`, uploadRoutes);
