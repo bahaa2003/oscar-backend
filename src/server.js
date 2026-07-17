@@ -33,6 +33,9 @@ const startServer = async () => {
         whatsappService.initializeWhatsAppClient().catch((err) => {
             console.error('[WhatsApp] startup initialization failed:', err.message);
         });
+        if (typeof process.send === 'function') {
+            process.send('ready');
+        }
 
         // ── Graceful Shutdown ─────────────────────────────────────────────────────
         const gracefulShutdown = (signal) => {

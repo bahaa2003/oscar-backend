@@ -14,8 +14,9 @@ module.exports = {
             script: 'src/server.js',
 
             // ── Cluster mode — utilise all CPU cores ──────────────────────
-            instances: 'max',
-            exec_mode: 'cluster',
+            // WhatsApp LocalAuth requires a single process for one userDataDir.
+            instances: 1,
+            exec_mode: 'fork',
 
             // ── Graceful restart settings ─────────────────────────────────
             watch: false,

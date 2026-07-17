@@ -15,5 +15,6 @@ router.use(requirePermission('MANAGE_SETTINGS'));
 
 router.get('/status', catchAsync(whatsappController.getStatus));
 router.post('/reconnect', catchAsync(whatsappController.reconnect));
+router.post('/reset', authorize('ADMIN'), catchAsync(whatsappController.reset));
 
 module.exports = router;
