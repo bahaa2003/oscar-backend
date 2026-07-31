@@ -27,7 +27,12 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
 const { User, ROLES, USER_STATUS } = require('../users/user.model');
-const { getHighestPercentageGroup } = require('../groups/group.service');
+const { getDefaultGroup } = require('../groups/group.service');
+const { createUserWithReferralCode } = require('../referrals/referralCode.service');
+const {
+    resolveRegistrationReferrer,
+    createEmailRegistrationAttributionFields,
+} = require('../referrals/referralAttribution.service');
 const emailService = require('../../services/email.service');
 const {
     AuthenticationError,
@@ -35,6 +40,11 @@ const {
     BusinessRuleError,
     NotFoundError,
 } = require('../../shared/errors/AppError');
+const {
+    createGoogleOAuthLoginCode,
+    consumeGoogleOAuthLoginCode,
+    INVALID_OR_EXPIRED_OAUTH_CODE,
+} = require('./googleOAuthLoginCode.service');
 const { createAuditLog } = require('../audit/audit.service');
 const { USER_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 
@@ -101,12 +111,12 @@ const _safeCompareHash = (candidateHash, storedHash) => {
  *
  * Business rules:
  *  1. Email must be unique.
- *  2. Assigned to the group with the highest markup percentage.
+ *  2. Assigned to the explicit default pricing group.
  *  3. Status starts as ACTIVE — no admin approval required.
  *  4. verified = false — user must click email link before login is allowed.
  *  5. A verification email is dispatched (fire-and-forget safe).
  */
-const register = async ({ name, email, password, currency, country, phone, username }) => {
+const register = async ({ name, email, password, currency, country, phone, username, referrerCode }) => {
     // ── 1. Prevent duplicate accounts ─────────────────────────────────────────
     const existing = await User.findOne({ email: email.toLowerCase() });
     if (existing) {
@@ -121,14 +131,18 @@ const register = async ({ name, email, password, currency, country, phone, usern
     }
 
     // ── 2. Pricing group ──────────────────────────────────────────────────────
-    const group = await getHighestPercentageGroup();
+    const group = await getDefaultGroup();
+    const referralAttribution = await resolveRegistrationReferrer({ referrerCode, email });
+    const referralFields = referralAttribution.applied
+        ? createEmailRegistrationAttributionFields(referralAttribution.referrer)
+        : {};
 
     // ── 3. Verification token ─────────────────────────────────────────────────
     const { rawToken, hashedToken } = _generateVerificationToken();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);  // +24 h
 
     // ── 4. Create user ────────────────────────────────────────────────────────
-    const user = await User.create({
+    const user = await createUserWithReferralCode({
         name,
         email,
         password,
@@ -142,7 +156,8 @@ const register = async ({ name, email, password, currency, country, phone, usern
         ...(country ? { country } : {}),
         ...(phone ? { phone } : {}),
         ...(username ? { username } : {}),
-    });
+        ...referralFields,
+    }, { User });
 
     // ── 5. Audit (fire-and-forget) ────────────────────────────────────────────
     createAuditLog({
@@ -151,7 +166,16 @@ const register = async ({ name, email, password, currency, country, phone, usern
         action: USER_ACTIONS.REGISTERED,
         entityType: ENTITY_TYPES.USER,
         entityId: user._id,
-        metadata: { email: user.email, name: user.name, groupId: user.groupId },
+        metadata: {
+            email: user.email,
+            name: user.name,
+            groupId: user.groupId,
+            referralApplied: referralAttribution.applied,
+            ...(referralAttribution.applied ? {
+                referralSource: user.referralSource,
+                referrerId: referralAttribution.referrer._id,
+            } : {}),
+        },
     });
 
     // ── 6. Send verification email (fire-and-forget — never block registration) ──
@@ -164,6 +188,10 @@ const register = async ({ name, email, password, currency, country, phone, usern
 
     return {
         user: user.toSafeObject(),
+        referral: {
+            applied: referralAttribution.applied,
+            reason: referralAttribution.reason,
+        },
         message:
             'Registration successful! Please check your email to verify your account. ' +
             'Once verified, you can start using the platform immediately.',
@@ -405,6 +433,72 @@ const loginWithGoogle = (user) => {
  * @param {string|ObjectId} userId
  * @returns {{ message: string }}
  */
+const createGoogleOAuthHandoff = async (user, googleOAuthContext = {}) => {
+    if (user.status === USER_STATUS.PENDING) {
+        return {
+            status: 'pending',
+            user: user.toSafeObject(),
+            message: 'Your account is awaiting admin approval. You will be notified once activated.',
+        };
+    }
+
+    if (user.status === USER_STATUS.REJECTED) {
+        throw new AuthenticationError(
+            'Your account was rejected by an administrator. Please contact support.'
+        );
+    }
+
+    const handoff = await createGoogleOAuthLoginCode({
+        userId: user._id,
+        codeChallenge: googleOAuthContext.codeChallenge,
+        codeChallengeMethod: googleOAuthContext.codeChallengeMethod,
+        oauthStateId: googleOAuthContext.stateId || null,
+    });
+
+    return {
+        code: handoff.rawCode,
+        expiresAt: handoff.expiresAt,
+    };
+};
+
+const exchangeGoogleOAuthCode = async ({ code, codeVerifier }) => {
+    let consumed;
+
+    try {
+        consumed = await consumeGoogleOAuthLoginCode({ code, codeVerifier });
+    } catch (_) {
+        throw new BusinessRuleError(
+            'Invalid or expired OAuth login code.',
+            INVALID_OR_EXPIRED_OAUTH_CODE
+        );
+    }
+
+    const user = await User.findOne({
+        _id: consumed.userId,
+        deletedAt: null,
+    });
+
+    if (!user || user.status !== USER_STATUS.ACTIVE) {
+        throw new BusinessRuleError(
+            'Invalid or expired OAuth login code.',
+            INVALID_OR_EXPIRED_OAUTH_CODE
+        );
+    }
+
+    const token = signToken(user._id, user.role);
+
+    createAuditLog({
+        actorId: user._id,
+        actorRole: ACTOR_ROLES[user.role] ?? user.role,
+        action: USER_ACTIONS.LOGIN_SUCCESS,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: { email: user.email, method: 'google-oauth', handoffConsumed: true },
+    });
+
+    return { token, user: user.toSafeObject() };
+};
+
 const generate2FASecret = async (userId) => {
     const user = await User.findById(userId);
     if (!user) throw new NotFoundError('User');
@@ -625,6 +719,8 @@ module.exports = {
     verifyEmail,
     resendVerification,
     loginWithGoogle,
+    createGoogleOAuthHandoff,
+    exchangeGoogleOAuthCode,
     generate2FASecret,
     enable2FA,
     disable2FA,

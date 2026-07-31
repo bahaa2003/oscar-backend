@@ -1,10 +1,29 @@
 'use strict';
 
 const mongoose = require('mongoose');
-const { DepositRequest, DEPOSIT_STATUS } = require('./deposit.model');
-const { User } = require('../users/user.model');
-const { creditWalletDirect } = require('../wallet/wallet.service');
-// convertUsdToUserCurrency removed — deposits now credit requestedAmount directly
+const {
+    DepositRequest,
+    DEPOSIT_STATUS,
+    REFERRAL_COMMISSION_EVALUATION_OUTCOME,
+} = require('./deposit.model');
+const { User, USER_STATUS } = require('../users/user.model');
+const {
+    creditWalletDirect,
+    TRANSACTION_SOURCE_TYPES,
+    TRANSACTION_OPERATIONS,
+} = require('../wallet/wallet.service');
+const { WalletTransaction, TRANSACTION_TYPES } = require('../wallet/walletTransaction.model');
+const {
+    ReferralCommission,
+} = require('../referrals/referralCommission.model');
+const {
+    evaluateDepositCommission,
+    createDepositCommission,
+    toMoneyString,
+    toRateString,
+} = require('../referrals/referralCommission.service');
+const { getConversionRate } = require('../../services/currencyConverter.service');
+// Deposit approval credits the USD snapshot (`amountUsd`) into the platform wallet.
 const {
     NotFoundError,
     BusinessRuleError,
@@ -14,6 +33,43 @@ const { createAuditLog } = require('../audit/audit.service');
 const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 const { notifyNewDeposit, notifyDepositApproved, notifyDepositRejected } = require('../notifications/notification.service');
 const whatsappService = require('../whatsapp/whatsapp.service');
+
+const APPROVAL_TRANSACTION_OPTIONS = Object.freeze({
+    readConcern: { level: 'snapshot' },
+    writeConcern: { w: 'majority' },
+    readPreference: 'primary',
+});
+
+const MAX_DEPOSIT_TRANSACTION_ATTEMPTS = 3;
+
+const DEPOSIT_RECONCILIATION_CODES = Object.freeze({
+    HEALTHY_APPROVED: 'HEALTHY_APPROVED',
+    APPROVED_WITHOUT_LEDGER: 'APPROVED_WITHOUT_LEDGER',
+    APPROVED_WITH_MULTIPLE_LEDGERS: 'APPROVED_WITH_MULTIPLE_LEDGERS',
+    APPROVED_WITH_LEDGER_AMOUNT_MISMATCH: 'APPROVED_WITH_LEDGER_AMOUNT_MISMATCH',
+    PENDING_WITH_EXISTING_LEDGER: 'PENDING_WITH_EXISTING_LEDGER',
+    REJECTED_WITH_CREDIT_LEDGER: 'REJECTED_WITH_CREDIT_LEDGER',
+    APPROVED_COMMISSION_MISSING: 'APPROVED_COMMISSION_MISSING',
+    APPROVED_COMMISSION_DUPLICATE: 'APPROVED_COMMISSION_DUPLICATE',
+    APPROVED_COMMISSION_MISMATCH: 'APPROVED_COMMISSION_MISMATCH',
+    APPROVED_COMMISSION_UNEXPECTED: 'APPROVED_COMMISSION_UNEXPECTED',
+    PENDING_WITH_EXISTING_COMMISSION: 'PENDING_WITH_EXISTING_COMMISSION',
+    REJECTED_WITH_EXISTING_COMMISSION: 'REJECTED_WITH_EXISTING_COMMISSION',
+    UNKNOWN: 'UNKNOWN',
+});
+
+let approvalTestHooks = {};
+
+const __setDepositApprovalTestHooks = (hooks = {}) => {
+    approvalTestHooks = hooks || {};
+};
+
+const runApprovalTestHook = async (name, payload) => {
+    if (process.env.NODE_ENV !== 'test') return;
+    if (typeof approvalTestHooks[name] === 'function') {
+        await approvalTestHooks[name](payload);
+    }
+};
 
 const safeParseJson = (value) => {
     if (typeof value !== 'string') return null;
@@ -160,6 +216,372 @@ const createDepositRequest = async ({
     return deposit;
 };
 
+const roundMoney = (value, decimals = 2) => Number(Number(value).toFixed(decimals));
+
+const amountsMatch = (left, right) => (
+    Number.isFinite(Number(left))
+    && Number.isFinite(Number(right))
+    && Math.abs(Number(left) - Number(right)) < 0.005
+);
+
+const normalizeApprovalOverrides = (adminOverrides = {}) => (
+    adminOverrides !== null
+    && typeof adminOverrides === 'object'
+    && !Array.isArray(adminOverrides)
+)
+    ? adminOverrides
+    : { amount: adminOverrides };
+
+const isMongoDuplicateKeyError = (err) => err?.code === 11000;
+
+const hasMongoErrorLabel = (err, label) => (
+    typeof err?.hasErrorLabel === 'function'
+        ? err.hasErrorLabel(label)
+        : Array.isArray(err?.errorLabels) && err.errorLabels.includes(label)
+);
+
+const isTransactionUnavailableError = (err) => {
+    const message = String(err?.message || '');
+    return err?.codeName === 'IllegalOperation'
+        || /transaction numbers are only allowed/i.test(message)
+        || /transactions are not supported/i.test(message)
+        || /replica set/i.test(message)
+        || /client session/i.test(message);
+};
+
+const makeReconciliationError = (classification) => new BusinessRuleError(
+    `Deposit approval requires manual reconciliation (${classification}).`,
+    'DEPOSIT_RECONCILIATION_REQUIRED'
+);
+
+const makeRetryExhaustedError = () => new BusinessRuleError(
+    'Deposit approval transaction retry attempts were exhausted.',
+    'DEPOSIT_APPROVAL_RETRY_EXHAUSTED'
+);
+
+const withBoundedApprovalTransactionRetry = async (session, transactionFn) => {
+    for (let attempt = 1; attempt <= MAX_DEPOSIT_TRANSACTION_ATTEMPTS; attempt += 1) {
+        try {
+            return await session.withTransaction(transactionFn, APPROVAL_TRANSACTION_OPTIONS);
+        } catch (err) {
+            if (!hasMongoErrorLabel(err, 'TransientTransactionError')) {
+                throw err;
+            }
+            if (attempt === MAX_DEPOSIT_TRANSACTION_ATTEMPTS) {
+                throw makeRetryExhaustedError();
+            }
+        }
+    }
+
+    throw makeRetryExhaustedError();
+};
+
+const populateDepositForReturn = (depositId) => DepositRequest.findById(depositId)
+    .populate('userId', 'name email avatar currency walletBalance')
+    .populate('reviewedBy', 'name email');
+
+const selectDepositForApproval = (query) => query.select('+referralCommissionEvaluation');
+
+const findDepositCreditLedgers = async (deposit, session = null) => {
+    if (!deposit?._id || !deposit?.userId) return [];
+
+    const query = WalletTransaction.find({
+        userId: deposit.userId,
+        type: TRANSACTION_TYPES.CREDIT,
+        $or: [
+            {
+                sourceType: TRANSACTION_SOURCE_TYPES.DEPOSIT,
+                sourceId: deposit._id,
+                operation: TRANSACTION_OPERATIONS.CREDIT,
+            },
+            {
+                reference: deposit._id,
+                $or: [
+                    { sourceType: null },
+                    { sourceType: { $exists: false } },
+                ],
+            },
+        ],
+    }).sort({ createdAt: 1 });
+
+    if (session) query.session(session);
+    return query;
+};
+
+const findDepositCommissions = async (deposit, session = null) => {
+    if (!deposit?._id) return [];
+
+    const query = ReferralCommission.find({ depositId: deposit._id }).sort({ createdAt: 1 });
+    if (session) query.session(session);
+    return query;
+};
+
+const commissionMatchesEvaluation = ({ deposit, ledger, commission }) => {
+    const evaluation = deposit.referralCommissionEvaluation;
+    if (!evaluation || evaluation.outcome !== REFERRAL_COMMISSION_EVALUATION_OUTCOME.CREATED) {
+        return false;
+    }
+
+    return objectIdsMatch(commission._id, evaluation.commissionId)
+        && objectIdsMatch(commission.depositId, deposit._id)
+        && objectIdsMatch(commission.referrerId, evaluation.referrerId)
+        && objectIdsMatch(commission.referredUserId, deposit.userId)
+        && objectIdsMatch(commission.walletTransactionId, ledger?._id)
+        && commission.sourceAmount === toMoneyString(deposit.requestedAmount)
+        && commission.sourceCurrency === deposit.currency
+        && commission.sourceExchangeRate === toRateString(deposit.exchangeRate)
+        && commission.sourceAmountUsd === toMoneyString(deposit.amountUsd)
+        && commission.commissionRatePercent === evaluation.ratePercent
+        && commission.commissionAmountUsd === evaluation.amountUsd
+        && commission.commissionCurrency === 'USD'
+        && commission.calculationVersion === 'v1'
+        && commission.policySource === 'ENV_REFERRAL_COMMISSION'
+        && commission.idempotencyKey === `deposit:${deposit._id}:referral-commission:v1`;
+};
+
+const objectIdsMatch = (left, right) => (
+    left != null
+    && right != null
+    && String(left) === String(right)
+);
+
+const classifyReferralCommissionState = ({ deposit, ledger, commissions = [] }) => {
+    const evaluation = deposit?.referralCommissionEvaluation || null;
+
+    if (deposit?.status === DEPOSIT_STATUS.PENDING && commissions.length > 0) {
+        return DEPOSIT_RECONCILIATION_CODES.PENDING_WITH_EXISTING_COMMISSION;
+    }
+
+    if (deposit?.status === DEPOSIT_STATUS.REJECTED && commissions.length > 0) {
+        return DEPOSIT_RECONCILIATION_CODES.REJECTED_WITH_EXISTING_COMMISSION;
+    }
+
+    if (deposit?.status !== DEPOSIT_STATUS.APPROVED) {
+        return DEPOSIT_RECONCILIATION_CODES.UNKNOWN;
+    }
+
+    if (!evaluation) {
+        return commissions.length > 0
+            ? DEPOSIT_RECONCILIATION_CODES.APPROVED_COMMISSION_UNEXPECTED
+            : DEPOSIT_RECONCILIATION_CODES.HEALTHY_APPROVED;
+    }
+
+    if (
+        evaluation.outcome === REFERRAL_COMMISSION_EVALUATION_OUTCOME.DISABLED
+        || evaluation.outcome === REFERRAL_COMMISSION_EVALUATION_OUTCOME.NOT_ELIGIBLE
+    ) {
+        return commissions.length > 0
+            ? DEPOSIT_RECONCILIATION_CODES.APPROVED_COMMISSION_UNEXPECTED
+            : DEPOSIT_RECONCILIATION_CODES.HEALTHY_APPROVED;
+    }
+
+    if (evaluation.outcome === REFERRAL_COMMISSION_EVALUATION_OUTCOME.CREATED) {
+        if (commissions.length === 0) {
+            return DEPOSIT_RECONCILIATION_CODES.APPROVED_COMMISSION_MISSING;
+        }
+        if (commissions.length > 1) {
+            return DEPOSIT_RECONCILIATION_CODES.APPROVED_COMMISSION_DUPLICATE;
+        }
+        if (!commissionMatchesEvaluation({ deposit, ledger, commission: commissions[0] })) {
+            return DEPOSIT_RECONCILIATION_CODES.APPROVED_COMMISSION_MISMATCH;
+        }
+        return DEPOSIT_RECONCILIATION_CODES.HEALTHY_APPROVED;
+    }
+
+    return DEPOSIT_RECONCILIATION_CODES.APPROVED_COMMISSION_MISMATCH;
+};
+
+const classifyDepositApprovalState = ({ deposit, ledgers = [], commissions = [] }) => {
+    if (!deposit) return DEPOSIT_RECONCILIATION_CODES.UNKNOWN;
+
+    const creditLedgers = (ledgers || []).filter((ledger) => ledger?.type === TRANSACTION_TYPES.CREDIT);
+
+    if (deposit.status === DEPOSIT_STATUS.APPROVED) {
+        if (creditLedgers.length === 0) {
+            return DEPOSIT_RECONCILIATION_CODES.APPROVED_WITHOUT_LEDGER;
+        }
+        if (creditLedgers.length > 1) {
+            return DEPOSIT_RECONCILIATION_CODES.APPROVED_WITH_MULTIPLE_LEDGERS;
+        }
+
+        const [ledger] = creditLedgers;
+        if (
+            !amountsMatch(ledger.amount, deposit.amountUsd)
+            && !amountsMatch(ledger.amount, deposit.requestedAmount)
+        ) {
+            return DEPOSIT_RECONCILIATION_CODES.APPROVED_WITH_LEDGER_AMOUNT_MISMATCH;
+        }
+
+        return classifyReferralCommissionState({
+            deposit,
+            ledger,
+            commissions,
+        });
+    }
+
+    if (deposit.status === DEPOSIT_STATUS.PENDING && creditLedgers.length > 0) {
+        return DEPOSIT_RECONCILIATION_CODES.PENDING_WITH_EXISTING_LEDGER;
+    }
+
+    if (deposit.status === DEPOSIT_STATUS.PENDING && commissions.length > 0) {
+        return DEPOSIT_RECONCILIATION_CODES.PENDING_WITH_EXISTING_COMMISSION;
+    }
+
+    if (deposit.status === DEPOSIT_STATUS.REJECTED && creditLedgers.length > 0) {
+        return DEPOSIT_RECONCILIATION_CODES.REJECTED_WITH_CREDIT_LEDGER;
+    }
+
+    if (deposit.status === DEPOSIT_STATUS.REJECTED && commissions.length > 0) {
+        return DEPOSIT_RECONCILIATION_CODES.REJECTED_WITH_EXISTING_COMMISSION;
+    }
+
+    return DEPOSIT_RECONCILIATION_CODES.UNKNOWN;
+};
+
+const resolveExistingApproval = async (deposit, session = null) => {
+    const [ledgers, commissions] = await Promise.all([
+        findDepositCreditLedgers(deposit, session),
+        findDepositCommissions(deposit, session),
+    ]);
+    const classification = classifyDepositApprovalState({ deposit, ledgers, commissions });
+
+    if (
+        deposit.status === DEPOSIT_STATUS.APPROVED
+        && classification === DEPOSIT_RECONCILIATION_CODES.HEALTHY_APPROVED
+    ) {
+        return {
+            depositId: deposit._id,
+            idempotent: true,
+            classification,
+        };
+    }
+
+    if (deposit.status === DEPOSIT_STATUS.REJECTED) {
+        throw new BusinessRuleError(
+            'A rejected deposit cannot be approved. Create a new request.',
+            'DEPOSIT_ALREADY_REJECTED'
+        );
+    }
+
+    if (classification !== DEPOSIT_RECONCILIATION_CODES.UNKNOWN) {
+        throw makeReconciliationError(classification);
+    }
+
+    throw new BusinessRuleError(
+        'Deposit approval state changed before the request could be claimed.',
+        'DEPOSIT_APPROVAL_CONFLICT'
+    );
+};
+
+const classifyUnknownCommitResult = async (depositId) => {
+    const deposit = await selectDepositForApproval(DepositRequest.findById(depositId));
+    if (!deposit) throw new NotFoundError('DepositRequest');
+
+    const [ledgers, commissions] = await Promise.all([
+        findDepositCreditLedgers(deposit),
+        findDepositCommissions(deposit),
+    ]);
+    const classification = classifyDepositApprovalState({ deposit, ledgers, commissions });
+
+    if (classification === DEPOSIT_RECONCILIATION_CODES.HEALTHY_APPROVED) {
+        return {
+            committed: true,
+            depositId: deposit._id,
+            classification,
+        };
+    }
+
+    if (
+        deposit.status === DEPOSIT_STATUS.PENDING
+        && ledgers.length === 0
+        && commissions.length === 0
+    ) {
+        throw new BusinessRuleError(
+            'Deposit approval commit result is unknown and appears retryable.',
+            'DEPOSIT_APPROVAL_RETRYABLE'
+        );
+    }
+
+    throw makeReconciliationError(classification);
+};
+
+const buildDepositApprovalSideEffects = ({
+    previousDeposit,
+    updatedDeposit,
+    adminId,
+    auditContext,
+    finalAmount,
+    finalCurrency,
+    finalCurrencyRate,
+    finalAmountUsd,
+    walletCreditAmount,
+    referralCommissionEvaluation,
+    commission,
+}) => {
+    const actorId = auditContext?.actorId ?? adminId;
+    const actorRole = auditContext?.actorRole ?? ACTOR_ROLES.ADMIN;
+    const ipAddress = auditContext?.ipAddress ?? null;
+    const userAgent = auditContext?.userAgent ?? null;
+    const walletCurrency = 'USD';
+    const source = {
+        sourceType: TRANSACTION_SOURCE_TYPES.DEPOSIT,
+        sourceId: updatedDeposit._id.toString(),
+        operation: TRANSACTION_OPERATIONS.CREDIT,
+        idempotencyKey: `deposit:${updatedDeposit._id}:credit`,
+    };
+
+    return () => {
+        createAuditLog({
+            actorId, actorRole, ipAddress, userAgent,
+            action: DEPOSIT_ACTIONS.APPROVED,
+            entityType: ENTITY_TYPES.DEPOSIT,
+            entityId: updatedDeposit._id,
+            metadata: {
+                userId: updatedDeposit.userId.toString(),
+                finalAmount,
+                finalCurrency,
+                originalRequestedAmount: previousDeposit.requestedAmount,
+                originalCurrency: previousDeposit.currency,
+                exchangeRate: finalCurrencyRate,
+                amountUsd: finalAmountUsd,
+                adminOverrideApplied: !!(
+                    previousDeposit.requestedAmount !== finalAmount
+                    || previousDeposit.currency !== finalCurrency
+                ),
+                walletCurrency,
+                walletCreditAmount,
+                conversionNote: `${finalAmount} ${finalCurrency} -> ${walletCreditAmount} USD`,
+                reviewedBy: adminId.toString(),
+                walletSourceIdentity: source,
+                referralCommission: referralCommissionEvaluation
+                    ? {
+                        outcome: referralCommissionEvaluation.outcome,
+                        reason: referralCommissionEvaluation.reason,
+                        commissionId: referralCommissionEvaluation.commissionId?.toString?.() || null,
+                        referrerId: referralCommissionEvaluation.referrerId?.toString?.() || null,
+                        amountUsd: referralCommissionEvaluation.amountUsd,
+                    }
+                    : null,
+            },
+        });
+
+        createAuditLog({
+            actorId, actorRole, ipAddress, userAgent,
+            action: WALLET_ACTIONS.CREDIT,
+            entityType: ENTITY_TYPES.WALLET,
+            entityId: updatedDeposit.userId,
+            metadata: {
+                depositId: updatedDeposit._id.toString(),
+                walletCurrency,
+                walletCreditAmount,
+                reason: 'DEPOSIT_APPROVED',
+                walletSourceIdentity: source,
+                referralCommissionId: commission?._id?.toString?.() || null,
+            },
+        });
+    };
+};
+
 // =============================================================================
 // APPROVE
 // =============================================================================
@@ -167,18 +589,25 @@ const createDepositRequest = async ({
 /**
  * Admin approves a deposit request and credits the user's wallet with amountUsd.
  *
- * All mutations use an atomic compare-and-swap on { _id, status: PENDING }:
+ * Legacy Phase 2A implementation retained for historical comparison only.
+ * The exported `approveDeposit` below is the active Phase 2B transaction path.
+ *
+ * Phase 2A used an atomic compare-and-swap on { _id, status: PENDING }:
  *   1. Load and validate the deposit.
  *   2. Atomic findOneAndUpdate — prevents double-approval even under
  *      concurrent requests (no-op if status changed).
- *   3. Atomically credit the user's wallet with the pre-calculated amountUsd.
+ *   3. Credit the user's wallet through the wallet helper.
+ *
+ * This legacy helper is not one shared MongoDB transaction across deposit
+ * status, wallet balance, and wallet ledger.
  *
  * Concurrency safety:
  *   findOneAndUpdate with { _id, status: PENDING } acts as a compare-and-swap.
  *   The first concurrent approve wins; the second finds no matching document
  *   (status is no longer PENDING) and throws DEPOSIT_ALREADY_APPROVED.
  *
- * Audit: DEPOSIT_APPROVED + WALLET_CREDIT — both fire-and-forget AFTER commit.
+ * Audit: DEPOSIT_APPROVED + WALLET_CREDIT are fire-and-forget after the
+ * financial writes in the current non-transactional flow.
  *
  * @param {string|ObjectId} depositId
  * @param {string|ObjectId} adminId
@@ -186,7 +615,15 @@ const createDepositRequest = async ({
  *
  * @returns {Promise<DepositRequest>}
  */
-const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditContext = null) => {
+const approveDepositPhase2A = async (depositId, adminId, adminOverrides = {}, auditContext = null) => {
+    const normalizedOverrides = (
+        adminOverrides !== null
+        && typeof adminOverrides === 'object'
+        && !Array.isArray(adminOverrides)
+    )
+        ? adminOverrides
+        : { amount: adminOverrides };
+
     // Pre-read to give clear error messages if status is already wrong
     const existing = await DepositRequest.findById(depositId);
     if (!existing) throw new NotFoundError('DepositRequest');
@@ -206,15 +643,30 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
 
     // ── Resolve final amount & currency (admin overrides take priority) ────
     const finalAmount = Number(parseFloat(
-        adminOverrides.amount ?? existing.requestedAmount
+        normalizedOverrides.amount ?? existing.requestedAmount
     ).toFixed(2));
     const finalCurrency = (
-        adminOverrides.currency || existing.currency || 'USD'
+        normalizedOverrides.currency || existing.currency || 'USD'
     ).toUpperCase();
 
     if (finalAmount <= 0) {
         throw new BusinessRuleError('Deposit amount must be greater than zero.', 'INVALID_AMOUNT');
     }
+
+    const userDoc = await User.findById(existing.userId).select('currency status');
+    if (!userDoc) throw new NotFoundError('User');
+    if (userDoc.status !== USER_STATUS.ACTIVE) {
+        throw new BusinessRuleError(
+            'Inactive users cannot receive deposit credits.',
+            'ACCOUNT_INACTIVE'
+        );
+    }
+
+    const { getConversionRate } = require('../../services/currencyConverter.service');
+    const finalCurrencyRate = await getConversionRate(finalCurrency);
+    const walletCurrency = (userDoc.currency ?? 'USD').toUpperCase();
+    const walletCurrencyRate = await getConversionRate(walletCurrency);
+    const finalAmountUsd = Number((finalAmount / finalCurrencyRate).toFixed(2));
 
     // ── Atomic compare-and-swap on { _id, status: PENDING } ──────────────
     const $setFields = {
@@ -224,14 +676,18 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     };
 
     // Persist admin overrides on the deposit document if provided
-    if (adminOverrides.amount != null) {
+    if (normalizedOverrides.amount != null) {
         $setFields.requestedAmount = finalAmount;
     }
-    if (adminOverrides.currency) {
+    if (normalizedOverrides.currency) {
         $setFields.currency = finalCurrency;
     }
-    if (adminOverrides.adminNotes) {
-        $setFields.adminNotes = String(adminOverrides.adminNotes).trim();
+    if (normalizedOverrides.amount != null || normalizedOverrides.currency) {
+        $setFields.exchangeRate = finalCurrencyRate;
+        $setFields.amountUsd = finalAmountUsd;
+    }
+    if (normalizedOverrides.adminNotes) {
+        $setFields.adminNotes = String(normalizedOverrides.adminNotes).trim();
     }
 
     const updated = await DepositRequest.findOneAndUpdate(
@@ -252,9 +708,6 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     //
     // Case 1 (same currency): Deposit SAR, wallet SAR → credit exact amount.
     // Case 2 (cross-currency): Deposit EGP, wallet SAR → EGP → USD → SAR.
-    const userDoc = await User.findById(updated.userId).select('currency');
-    const walletCurrency = (userDoc?.currency ?? 'USD').toUpperCase();
-
     let walletCreditAmount;
     let conversionNote;
 
@@ -264,12 +717,8 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
         conversionNote = `${finalAmount} ${finalCurrency} (direct, no conversion)`;
     } else {
         // Cross-currency: finalCurrency → USD → walletCurrency
-        const { getConversionRate } = require('../../services/currencyConverter.service');
-        const fromRate = await getConversionRate(finalCurrency);   // e.g. EGP → 1 USD = 50 EGP  → rate=50
-        const toRate   = await getConversionRate(walletCurrency);  // e.g. SAR → 1 USD = 3.75 SAR → rate=3.75
-
-        const amountInUsd = Number((finalAmount / fromRate).toFixed(6));
-        walletCreditAmount = Number((amountInUsd * toRate).toFixed(2));
+        const amountInUsd = Number((finalAmount / finalCurrencyRate).toFixed(6));
+        walletCreditAmount = Number((amountInUsd * walletCurrencyRate).toFixed(2));
         conversionNote = `${finalAmount} ${finalCurrency} → ${amountInUsd} USD → ${walletCreditAmount} ${walletCurrency}`;
     }
 
@@ -298,7 +747,9 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
             finalCurrency,
             originalRequestedAmount: existing.requestedAmount,
             originalCurrency: existing.currency,
-            adminOverrideApplied: !!(adminOverrides.amount || adminOverrides.currency),
+            exchangeRate: finalCurrencyRate,
+            amountUsd: finalAmountUsd,
+            adminOverrideApplied: !!(normalizedOverrides.amount || normalizedOverrides.currency),
             walletCurrency,
             walletCreditAmount,
             conversionNote,
@@ -328,6 +779,292 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
 
     // Notification: fire-and-forget
     notifyDepositApproved(populated);
+
+    return populated;
+};
+
+const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditContext = null) => {
+    const normalizedOverrides = normalizeApprovalOverrides(adminOverrides);
+    let postCommitSideEffects = null;
+    let transactionResult = null;
+    let transactionAttemptCount = 0;
+    let session;
+
+    try {
+        session = await mongoose.startSession();
+    } catch (_) {
+        throw new BusinessRuleError(
+            'Deposit approval requires MongoDB transaction support.',
+            'FINANCIAL_TRANSACTION_UNAVAILABLE'
+        );
+    }
+
+    if (!session || typeof session.withTransaction !== 'function') {
+        if (session) await session.endSession();
+        throw new BusinessRuleError(
+            'Deposit approval requires MongoDB transaction support.',
+            'FINANCIAL_TRANSACTION_UNAVAILABLE'
+        );
+    }
+
+    try {
+        await runApprovalTestHook('beforeTransaction', { depositId, adminId });
+
+        transactionResult = await withBoundedApprovalTransactionRetry(session, async () => {
+            transactionAttemptCount += 1;
+            if (transactionAttemptCount > MAX_DEPOSIT_TRANSACTION_ATTEMPTS) {
+                throw makeRetryExhaustedError();
+            }
+            await runApprovalTestHook('transactionAttemptStarted', {
+                depositId,
+                adminId,
+                attempt: transactionAttemptCount,
+                maxAttempts: MAX_DEPOSIT_TRANSACTION_ATTEMPTS,
+            });
+
+            const existing = await selectDepositForApproval(
+                DepositRequest.findById(depositId).session(session)
+            );
+            if (!existing) throw new NotFoundError('DepositRequest');
+
+            if (existing.status !== DEPOSIT_STATUS.PENDING) {
+                return resolveExistingApproval(existing, session);
+            }
+
+            const [pendingLedgers, pendingCommissions] = await Promise.all([
+                findDepositCreditLedgers(existing, session),
+                findDepositCommissions(existing, session),
+            ]);
+            const pendingClassification = classifyDepositApprovalState({
+                deposit: existing,
+                ledgers: pendingLedgers,
+                commissions: pendingCommissions,
+            });
+            if (pendingClassification !== DEPOSIT_RECONCILIATION_CODES.UNKNOWN) {
+                throw makeReconciliationError(pendingClassification);
+            }
+
+            const userDoc = await User.findById(existing.userId)
+                .select('currency status +referredBy +referredAt +referralSource')
+                .session(session);
+            if (!userDoc) throw new NotFoundError('User');
+            if (userDoc.status !== USER_STATUS.ACTIVE) {
+                throw new BusinessRuleError(
+                    'Inactive users cannot receive deposit credits.',
+                    'ACCOUNT_INACTIVE'
+                );
+            }
+
+            const hasAmountOverride = normalizedOverrides.amount != null && normalizedOverrides.amount !== '';
+            const hasCurrencyOverride = !!normalizedOverrides.currency;
+            const finalAmount = roundMoney(
+                parseFloat(hasAmountOverride ? normalizedOverrides.amount : existing.requestedAmount)
+            );
+            const finalCurrency = String(
+                hasCurrencyOverride ? normalizedOverrides.currency : existing.currency || 'USD'
+            ).toUpperCase();
+
+            if (!Number.isFinite(finalAmount) || finalAmount <= 0) {
+                throw new BusinessRuleError(
+                    'Deposit amount must be greater than zero.',
+                    'INVALID_APPROVED_AMOUNT'
+                );
+            }
+
+            const currentRate = hasAmountOverride || hasCurrencyOverride
+                ? await getConversionRate(finalCurrency, {
+                    session,
+                    bypassCache: true,
+                })
+                : null;
+            const finalCurrencyRate = hasAmountOverride || hasCurrencyOverride
+                ? currentRate
+                : Number(existing.exchangeRate);
+            const finalAmountUsd = hasAmountOverride || hasCurrencyOverride
+                ? roundMoney(finalAmount / currentRate)
+                : roundMoney(existing.amountUsd);
+
+            if (
+                !Number.isFinite(finalCurrencyRate)
+                || finalCurrencyRate <= 0
+                || !Number.isFinite(finalAmountUsd)
+                || finalAmountUsd <= 0
+            ) {
+                throw new BusinessRuleError(
+                    'Deposit financial snapshots are invalid.',
+                    'INVALID_DEPOSIT_SNAPSHOT'
+                );
+            }
+
+            const $setFields = {
+                status: DEPOSIT_STATUS.APPROVED,
+                reviewedBy: adminId,
+                reviewedAt: new Date(),
+                requestedAmount: finalAmount,
+                currency: finalCurrency,
+                exchangeRate: finalCurrencyRate,
+                amountUsd: finalAmountUsd,
+            };
+
+            if (normalizedOverrides.adminNotes) {
+                $setFields.adminNotes = String(normalizedOverrides.adminNotes).trim();
+            }
+
+            await runApprovalTestHook('beforeDepositUpdate', {
+                depositId,
+                userId: existing.userId,
+                finalAmount,
+                finalCurrency,
+                finalAmountUsd,
+            });
+
+            const updated = await DepositRequest.findOneAndUpdate(
+                { _id: depositId, status: DEPOSIT_STATUS.PENDING },
+                { $set: $setFields },
+                { new: true, session }
+            );
+
+            if (!updated) {
+                const current = await selectDepositForApproval(
+                    DepositRequest.findById(depositId).session(session)
+                );
+                if (!current) throw new NotFoundError('DepositRequest');
+                return resolveExistingApproval(current, session);
+            }
+
+            await runApprovalTestHook('afterDepositUpdate', {
+                depositId,
+                userId: updated.userId,
+                finalAmountUsd,
+            });
+
+            const walletCreditAmount = finalAmountUsd;
+            const { transaction: walletTransaction } = await creditWalletDirect({
+                userId: updated.userId,
+                amount: walletCreditAmount,
+                reference: updated._id,
+                description: `Deposit #${updated._id.toString().slice(-6)} (${finalAmount} ${finalCurrency})`,
+                session,
+                sourceType: TRANSACTION_SOURCE_TYPES.DEPOSIT,
+                sourceId: updated._id,
+                operation: TRANSACTION_OPERATIONS.CREDIT,
+                idempotencyKey: `deposit:${updated._id}:credit`,
+                requireSourceIdentity: true,
+            });
+
+            const commissionEvaluation = await evaluateDepositCommission({
+                referredUser: userDoc,
+                approvalTimestamp: updated.reviewedAt,
+                sourceAmountUsd: finalAmountUsd,
+                session,
+            });
+
+            let commission = null;
+            let referralCommissionEvaluation = commissionEvaluation.evaluation;
+
+            if (commissionEvaluation.eligible) {
+                await runApprovalTestHook('beforeReferralCommissionInsert', {
+                    depositId: updated._id,
+                    walletTransactionId: walletTransaction._id,
+                    referrerId: commissionEvaluation.referrer._id,
+                    commissionAmountUsd: commissionEvaluation.commissionAmountUsd,
+                });
+
+                commission = await createDepositCommission({
+                    referrer: commissionEvaluation.referrer,
+                    referredUser: userDoc,
+                    deposit: updated,
+                    walletTransaction,
+                    evaluation: commissionEvaluation.evaluation,
+                    session,
+                });
+
+                referralCommissionEvaluation = {
+                    ...commissionEvaluation.evaluation,
+                    commissionId: commission._id,
+                };
+            }
+
+            await runApprovalTestHook('beforeReferralCommissionEvaluationUpdate', {
+                depositId: updated._id,
+                evaluation: referralCommissionEvaluation,
+                commissionId: commission?._id || null,
+            });
+
+            const evaluationUpdate = await DepositRequest.updateOne(
+                { _id: updated._id },
+                { $set: { referralCommissionEvaluation } },
+                { session }
+            );
+
+            if (evaluationUpdate.matchedCount !== 1) {
+                throw new BusinessRuleError(
+                    'Deposit commission evaluation snapshot could not be persisted.',
+                    'DEPOSIT_COMMISSION_EVALUATION_UPDATE_FAILED'
+                );
+            }
+
+            updated.referralCommissionEvaluation = referralCommissionEvaluation;
+
+            postCommitSideEffects = buildDepositApprovalSideEffects({
+                previousDeposit: existing,
+                updatedDeposit: updated,
+                adminId,
+                auditContext,
+                finalAmount,
+                finalCurrency,
+                finalCurrencyRate,
+                finalAmountUsd,
+                walletCreditAmount,
+                referralCommissionEvaluation,
+                commission,
+            });
+
+            return {
+                depositId: updated._id,
+                idempotent: false,
+                classification: DEPOSIT_RECONCILIATION_CODES.HEALTHY_APPROVED,
+            };
+        });
+
+        await runApprovalTestHook('afterCommitBeforeResult', {
+            depositId: transactionResult?.depositId || depositId,
+            transactionResult,
+        });
+    } catch (err) {
+        if (hasMongoErrorLabel(err, 'UnknownTransactionCommitResult')) {
+            transactionResult = await classifyUnknownCommitResult(depositId);
+        } else if (isMongoDuplicateKeyError(err)) {
+            const deposit = await selectDepositForApproval(DepositRequest.findById(depositId));
+            if (!deposit) throw new NotFoundError('DepositRequest');
+            transactionResult = await resolveExistingApproval(deposit);
+        } else if (isTransactionUnavailableError(err)) {
+            throw new BusinessRuleError(
+                'Deposit approval requires MongoDB transaction support.',
+                'FINANCIAL_TRANSACTION_UNAVAILABLE'
+            );
+        } else {
+            throw err;
+        }
+    } finally {
+        await session.endSession();
+    }
+
+    const populated = await populateDepositForReturn(transactionResult.depositId || depositId);
+    if (!populated) throw new NotFoundError('DepositRequest');
+
+    if (!transactionResult.idempotent) {
+        if (postCommitSideEffects) {
+            await runApprovalTestHook('beforePostCommitAudit', {
+                depositId: transactionResult.depositId || depositId,
+            });
+            postCommitSideEffects();
+        }
+        await runApprovalTestHook('beforeApprovalNotification', {
+            depositId: transactionResult.depositId || depositId,
+        });
+        notifyDepositApproved(populated);
+    }
 
     return populated;
 };
@@ -566,4 +1303,10 @@ module.exports = {
     getDepositById,
     updatePendingDeposit,
     normalizeSenderDetails,
+    DEPOSIT_RECONCILIATION_CODES,
+    MAX_DEPOSIT_TRANSACTION_ATTEMPTS,
+    classifyDepositApprovalState,
+    findDepositCreditLedgers,
+    findDepositCommissions,
+    __setDepositApprovalTestHooks,
 };

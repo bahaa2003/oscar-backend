@@ -149,7 +149,20 @@ const updateUser = async (id, data, adminId) => {
         }
     }
     if (verified !== undefined) user.verified = verified;
-    if (groupId !== undefined) user.groupId = groupId;
+    if (groupId !== undefined) {
+        if (groupId !== null) {
+            const Group = require('../groups/group.model');
+            const group = await Group.findById(groupId);
+            if (!group) throw new NotFoundError('Group');
+            if (group.deletedAt) {
+                throw new BusinessRuleError(`Group '${group.name}' is deleted and cannot be assigned.`, 'GROUP_DELETED');
+            }
+            if (!group.isActive) {
+                throw new BusinessRuleError(`Group '${group.name}' is inactive and cannot be assigned.`, 'GROUP_INACTIVE');
+            }
+        }
+        user.groupId = groupId;
+    }
 
     if (email !== undefined && email !== user.email) {
         const exists = await User.findOne({ email: email.toLowerCase(), _id: { $ne: id } });

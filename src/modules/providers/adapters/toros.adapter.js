@@ -114,8 +114,8 @@ class TorosfonAdapter extends BaseProviderAdapter {
             externalProductId: String(item.id ?? item.product_id ?? item.service ?? item.code),
             rawName: String(item.product_name ?? item.name ?? item.product_name_translated ?? item.title ?? item.service_name ?? 'Unknown'),
             rawPrice: String(item.product_price ?? item.rate ?? item.price ?? item.cost ?? 0),
-            minQty: parseInt(item.min ?? item.min_qty ?? item.min_quantity ?? 1, 10),
-            maxQty: parseInt(item.max ?? item.max_qty ?? item.max_quantity ?? 9999, 10),
+            minQty: parseInt(item.min ?? item.min_order ?? item.min_qty ?? item.min_quantity ?? 1, 10),
+            maxQty: parseInt(item.max ?? item.max_order ?? item.max_qty ?? item.max_quantity ?? 9999, 10),
             isActive: item.active !== false && item.is_active !== false && item.status !== 'inactive' && item.status !== 'Inactive',
             rawPayload: item,
         }));

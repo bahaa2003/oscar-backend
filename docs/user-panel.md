@@ -23,6 +23,49 @@ This means a user who has registered but not yet been approved by an admin will 
 
 ---
 
+## Referral Dashboard
+
+Phase 2D adds authenticated referral dashboard routes under `/api/referrals/me/*`. They use the same JWT and active-user requirements as the user panel, but they are mounted under the referrals module so the public client cannot submit an arbitrary referrer identity.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/referrals/me/dashboard` | Own referral code, relative invite path, referred-user count, and commission totals by status |
+| `GET /api/referrals/me/commissions` | Read-only commission history with `status`, date, and pagination filters |
+| `GET /api/referrals/me/invitees` | Privacy-safe referred-user history with source, date, and pagination filters |
+| `POST /api/referrals/me/payouts` | Request payout for selected own `AVAILABLE` commissions |
+| `GET /api/referrals/me/payouts` | Own payout history with status/method/date pagination filters |
+| `GET /api/referrals/me/payouts/:id` | One own payout request |
+
+The backend derives ownership from `req.user._id`. `referrerId`, `userId`, and `referredBy` query/body overrides are rejected. Commission totals come from immutable `ReferralCommission` rows and are returned as Decimal strings in USD. Invitee records expose display name, masked email, joined timestamp, referral source, and grouped commission summary only.
+
+Phase 2E lets the authenticated referrer request payout of selected own `AVAILABLE` commissions. The backend calculates the USD total, creates a `PENDING` payout request, and locks the selected commissions in one transaction. Users cannot submit `referrerId`, change commission amounts, mark commissions paid, reject requests, settle requests, mutate referral balances, or access another user's payout.
+
+Admin review is separate. Rejection unlocks commissions; `WALLET` settlement credits the referrer's wallet once after admin approval; `MANUAL` settlement records an external reference without wallet credit. No user-facing payout cancellation, external payment provider, or retroactive commission generation exists.
+
+---
+
+## Reseller/Sub-Agent Applications
+
+Phase 3A adds authenticated customer APIs under `/api/reseller-applications/me/*`. "Sub-Agent" is the customer-facing label for the same backend `RESELLER` commercial state. This is not an auth role, so users remain `CUSTOMER`, `ADMIN`, or `SUPERVISOR` for authentication/authorization.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/reseller-applications/me` | Submit one current user's reseller/sub-agent application |
+| `GET /api/reseller-applications/me/current` | Current commercial reseller state, latest application, `canApply`, and safe group metadata |
+| `GET /api/reseller-applications/me/history` | Current user's own application history with pagination |
+
+Only active users can submit or read these routes. The backend derives ownership from the JWT user and ignores client-submitted commercial state, reviewer, or group assignment fields. Duplicate identical pending submissions return the existing application; different payloads while pending return a conflict. A rejected user may reapply when the configured cooldown permits.
+
+User responses do not expose reviewer identity, full internal snapshots, group pricing internals, or other users' applications. Approval, rejection, suspension, and reactivation are admin-only workflows.
+
+## Phase 3B Reseller Pricing
+
+Approved reseller/sub-agent status affects future catalog, quote, and order prices only through the backend pricing resolver. Customers see backend-resolved prices in product/catalog responses and may request read-only quotes with `POST /api/pricing/me/quote`. The client submits product ids, quantities, and order fields only; it cannot submit authoritative prices, totals, Groups, percentages, reseller state, exchange rates, or another `userId`.
+
+Suspended resellers do not continue receiving reseller pricing. Future orders use the effective non-reseller/default Group state, while old orders keep their immutable snapshots. Referral commissions, payout requests, and referrer wallet balances are not changed by reseller pricing.
+
+---
+
 ## Profile
 
 ### GET /api/me
@@ -265,33 +308,28 @@ Single order detail. Ownership is enforced — a customer cannot access another 
 
 ## Deposits
 
-### POST /api/me/deposits
+### POST /api/deposits
 
-Submit a deposit request. Supports two content types:
+Submit a deposit request with a receipt upload:
 
 **Option A — multipart/form-data (recommended):**
 ```
 Content-Type: multipart/form-data
-amountRequested: 100
-transferredFromNumber: +1-555-0100
-screenshotProof: <file>    ← field name must be exactly "screenshotProof"
+requestedAmount: 100
+currency: EGP
+paymentMethodId: vodafone-cash
+senderWalletNumber: +1-555-0100
+receipt: <file>
 ```
 
-The file is saved to `/uploads/` on the server. `transferImageUrl` is auto-set on the deposit record.
-
-**Option B — application/json:**
-```json
-{
-  "amountRequested": 100,
-  "transferredFromNumber": "+1-555-0100",
-  "transferImageUrl": "https://cdn.example.com/receipt.png"
-}
-```
+The file is saved under `/uploads/deposits/` on the server. `receiptImage` is stored on the deposit record.
 
 **Validation:**
-- `amountRequested` — required, float > 0
-- `transferredFromNumber` — required, string, max 100 chars
-- Either `screenshotProof` (file upload) or `transferImageUrl` (JSON) must be provided
+- `requestedAmount` - required, float > 0
+- `currency` - required, active ISO 4217 code
+- `paymentMethodId` - required, active public payment settings method
+- `receipt` - required upload field
+- sender detail compatibility fields are normalized into `senderDetails`
 
 **Response `201`:**
 ```json
@@ -300,9 +338,11 @@ The file is saved to `/uploads/` on the server. `transferImageUrl` is auto-set o
     "deposit": {
       "_id": "64dep...",
       "status": "PENDING",
-      "amountRequested": 100,
-      "transferredFromNumber": "+1-555-0100",
-      "transferImageUrl": "https://server.com/uploads/receipt-1709000000.jpg",
+      "requestedAmount": 100,
+      "currency": "EGP",
+      "exchangeRate": 50,
+      "amountUsd": 2,
+      "receiptImage": "uploads/deposits/receipt-1709000000.jpg",
       "createdAt": "2024-03-10T04:00:00Z"
     }
   }
@@ -326,8 +366,8 @@ Single deposit detail. Ownership enforced — customers can only view their own 
     "deposit": {
       "_id": "64dep...",
       "status": "APPROVED",
-      "amountRequested": 100,
-      "amountApproved": 95,
+      "requestedAmount": 100,
+      "amountUsd": 2,
       "reviewedAt": "2024-03-10T10:00:00Z",
       "createdAt": "2024-03-10T04:00:00Z"
     }

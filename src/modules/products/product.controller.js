@@ -3,6 +3,11 @@
 const productService = require('./product.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
+const {
+    resolveEffectivePricingContext,
+    calculateProductPrice,
+    serializeCustomerProductPrice,
+} = require('../pricing/commercialPricing.service');
 
 // ─── Sensitive fields that must NEVER reach non-admin clients ─────────────────
 
@@ -60,22 +65,22 @@ const listProducts = catchAsync(async (req, res) => {
 
     const { products, pagination } = await productService.listProducts({ activeOnly, page, limit });
 
-    // Apply group markup for non-admin users
-    if (activeOnly && req.user.groupId) {
-        const Group = require('../groups/group.model');
-        const group = await Group.findById(req.user.groupId);
-        const markup = Number(group?.percentage || 0);
-
-        if (markup > 0) {
-            const { computeMarkup } = require('../../shared/utils/decimalPrecision');
-            for (const product of products) {
-                const base = String(product.finalPrice || product.basePrice || '0');
-                product.finalPrice = computeMarkup(base, 'percentage', markup);
-            }
-        }
+    let responseProducts = products;
+    if (activeOnly) {
+        const pricingContext = await resolveEffectivePricingContext(req.user._id);
+        responseProducts = products.map((product) => {
+            const pricing = calculateProductPrice({
+                product,
+                pricingContext,
+                quantity: 1,
+                currency: 'USD',
+                exchangeRate: 1,
+            });
+            return serializeCustomerProductPrice(product, pricing, pricingContext);
+        });
     }
 
-    const responseProducts = isAdmin ? products : sanitizeProductsForCustomer(products);
+    responseProducts = isAdmin ? responseProducts : sanitizeProductsForCustomer(responseProducts);
     sendPaginated(res, responseProducts, pagination, 'Products retrieved successfully.');
 });
 
@@ -85,7 +90,19 @@ const listProducts = catchAsync(async (req, res) => {
 const getProduct = catchAsync(async (req, res) => {
     const isAdmin = req.user?.role === 'ADMIN';
     const product = await productService.getProductById(req.params.id, { activeOnly: !isAdmin });
-    const responseProduct = isAdmin ? product : sanitizeProductForCustomer(product);
+    let responseProduct = product;
+    if (!isAdmin) {
+        const pricingContext = await resolveEffectivePricingContext(req.user._id);
+        const pricing = calculateProductPrice({
+            product,
+            pricingContext,
+            quantity: 1,
+            currency: 'USD',
+            exchangeRate: 1,
+        });
+        responseProduct = serializeCustomerProductPrice(product, pricing, pricingContext);
+    }
+    responseProduct = isAdmin ? responseProduct : sanitizeProductForCustomer(responseProduct);
     sendSuccess(res, responseProduct);
 });
 

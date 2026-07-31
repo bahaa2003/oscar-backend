@@ -7,8 +7,8 @@ const catchAsync = require('../../shared/utils/catchAsync');
 // ─── Create ───────────────────────────────────────────────────────────────────
 
 const createGroup = catchAsync(async (req, res) => {
-    const { name, percentage, billingMode } = req.body;
-    const group = await groupService.createGroup({ name, percentage, billingMode });
+    const { name, percentage, billingMode, isActive, isDefault } = req.body;
+    const group = await groupService.createGroup({ name, percentage, billingMode, isActive, isDefault });
     sendCreated(res, group, 'Group created successfully.');
 });
 
@@ -45,12 +45,13 @@ const updateGroupPercentage = catchAsync(async (req, res) => {
  * General group update (name, percentage, isActive).
  */
 const updateGroup = catchAsync(async (req, res) => {
-    const { name, percentage, isActive, billingMode } = req.body;
+    const { name, percentage, isActive, billingMode, isDefault } = req.body;
     const group = await groupService.updateGroup(req.params.id, {
         name,
         percentage: percentage !== undefined ? parseFloat(percentage) : undefined,
         isActive,
         billingMode,
+        isDefault,
     });
     sendSuccess(res, group, 'Group updated successfully.');
 });

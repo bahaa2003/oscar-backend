@@ -17,6 +17,14 @@ const createGroupValidation = [
     body('billingMode')
         .optional()
         .isIn(['standard', 'quantity_only']).withMessage('billingMode must be "standard" or "quantity_only"'),
+
+    body('isActive')
+        .optional()
+        .isBoolean().withMessage('isActive must be a boolean'),
+
+    body('isDefault')
+        .optional()
+        .isBoolean().withMessage('isDefault must be a boolean'),
 ];
 
 // ─── Update Percentage ────────────────────────────────────────────────────────
@@ -52,6 +60,10 @@ const updateGroupValidation = [
     body('billingMode')
         .optional()
         .isIn(['standard', 'quantity_only']).withMessage('billingMode must be "standard" or "quantity_only"'),
+
+    body('isDefault')
+        .optional()
+        .isBoolean().withMessage('isDefault must be a boolean'),
 ];
 
 // ─── Change User's Group ──────────────────────────────────────────────────────

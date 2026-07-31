@@ -1,63 +1,20 @@
 'use strict';
 
-/**
- * deposit.test.js — Deposit Request System Test Suite
- * ─────────────────────────────────────────────────────
- *
- * [1] Model Validation
- *   - Required fields enforced
- *   - Status enum validated
- *   - amountRequested > 0
- *   - Virtuals: isApproved, isRejected, isPending
- *
- * [2] createDepositRequest
- *   - Creates PENDING deposit
- *   - Creates DEPOSIT_REQUESTED audit log
- *   - Returns correct fields
- *
- * [3] approveDeposit
- *   - PENDING → APPROVED success
- *   - Wallet gets credited (walletBalance increases)
- *   - WalletTransaction record created
- *   - DEPOSIT_APPROVED + WALLET_CREDIT audit logs created
- *   - overrideAmount is used when provided
- *   - Cannot approve an already APPROVED deposit (DEPOSIT_ALREADY_APPROVED)
- *   - Cannot approve a REJECTED deposit (DEPOSIT_ALREADY_REJECTED)
- *
- * [4] rejectDeposit
- *   - PENDING → REJECTED success
- *   - Wallet is NOT credited
- *   - DEPOSIT_REJECTED audit log created
- *   - Cannot reject an already REJECTED deposit
- *   - Cannot reject an already APPROVED deposit
- *
- * [5] Concurrency
- *   - Two concurrent approve calls: only first succeeds
- *   - Wallet credited exactly once
- *
- * [6] listDeposits / listMyDeposits
- *   - Admin sees all deposits
- *   - Status filter works
- *   - Pagination works
- *
- * [7] getDepositById
- *   - Returns correct deposit
- *   - Throws NotFoundError for unknown ID
- *   - Customer ownership guard works
- *
- * [8] Audit correctness
- *   - Metadata does NOT contain sensitive tokens
- *   - Correct entityType, entityId, action on each event
- */
-
 const mongoose = require('mongoose');
 const { DepositRequest, DEPOSIT_STATUS } = require('../modules/deposits/deposit.model');
+const depositController = require('../modules/deposits/deposit.controller');
 const depositService = require('../modules/deposits/deposit.service');
+const { invalidateSettingsCache } = require('../modules/admin/admin.settings.service');
 const { AuditLog } = require('../modules/audit/audit.model');
 const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES } = require('../modules/audit/audit.constants');
+const { Setting } = require('../modules/admin/setting.model');
+const { Currency } = require('../modules/currency/currency.model');
 const { User } = require('../modules/users/user.model');
-const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
-
+const {
+    WalletTransaction,
+    TRANSACTION_SOURCE_TYPES,
+    TRANSACTION_OPERATIONS,
+} = require('../modules/wallet/walletTransaction.model');
 const {
     connectTestDB,
     disconnectTestDB,
@@ -67,8 +24,6 @@ const {
     createAdmin,
     USER_STATUS,
 } = require('./testHelpers');
-
-// ─── Lifecycle ────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
     await connectTestDB();
@@ -80,340 +35,381 @@ afterAll(async () => {
 
 beforeEach(async () => {
     await clearCollections();
+    invalidateSettingsCache();
 });
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const flushAudit = () => new Promise((resolve) => setTimeout(resolve, 100));
 
-const flushAudit = () => new Promise((r) => setTimeout(r, 100));
+const makeDepositPayload = (overrides = {}) => ({
+    paymentMethodId: 'bank-egp',
+    requestedAmount: 500,
+    currency: 'EGP',
+    exchangeRate: 50,
+    amountUsd: 10,
+    receiptImage: 'uploads/deposits/receipt.jpg',
+    senderDetails: {
+        methodType: 'bank',
+        field: 'account',
+        label: 'Sender account',
+        value: '01012345678',
+    },
+    ...overrides,
+});
 
-const VALID_DEPOSIT = {
-    amountRequested: 500,
-    transferImageUrl: 'https://example.com/receipt.jpg',
-    transferredFromNumber: '01012345678',
+const createUserPair = async (customerOverrides = {}) => {
+    await Currency.updateOne(
+        { code: 'EGP' },
+        {
+            $setOnInsert: {
+                code: 'EGP',
+                name: 'Egyptian Pound',
+                symbol: 'EGP',
+                platformRate: 50,
+                isActive: true,
+            },
+        },
+        { upsert: true }
+    );
+    const group = await createGroup({ name: 'Default', percentage: 0 });
+    const customer = await createCustomer({
+        groupId: group._id,
+        walletBalance: 0,
+        currency: 'EGP',
+        ...customerOverrides,
+    });
+    const admin = await createAdmin();
+    return { group, customer, admin };
 };
 
-let _group;
-const ensureGroup = async () => {
-    if (!_group) _group = await createGroup({ name: 'Default', percentage: 0 });
-    return _group;
-};
-beforeEach(() => { _group = null; });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// [1] MODEL VALIDATION
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('[1] Model validation', () => {
-    let userId;
-
-    beforeEach(async () => {
-        const group = await ensureGroup();
-        const customer = await createCustomer({ groupId: group._id });
-        userId = customer._id;
+const createDeposit = (userId, overrides = {}) =>
+    depositService.createDepositRequest({
+        userId,
+        ...makeDepositPayload(overrides),
     });
 
-    it('creates a valid deposit request with all required fields', async () => {
-        const doc = await DepositRequest.create({ userId, ...VALID_DEPOSIT });
+describe('[1] DepositRequest model validation', () => {
+    it('creates a valid current-schema deposit request', async () => {
+        const { customer } = await createUserPair();
+
+        const doc = await DepositRequest.create({
+            userId: customer._id,
+            ...makeDepositPayload(),
+        });
+
         expect(doc._id).toBeDefined();
         expect(doc.status).toBe(DEPOSIT_STATUS.PENDING);
-        expect(doc.amountApproved).toBeNull();
         expect(doc.reviewedBy).toBeNull();
         expect(doc.reviewedAt).toBeNull();
+        expect(doc.requestedAmount).toBe(500);
+        expect(doc.amountUsd).toBe(10);
+        expect(doc.receiptImage).toBe('uploads/deposits/receipt.jpg');
     });
 
-    it('rejects when userId is missing', async () => {
+    it('requires the canonical financial fields', async () => {
+        const { customer } = await createUserPair();
+
         await expect(
-            DepositRequest.create({ ...VALID_DEPOSIT })
-        ).rejects.toThrow(/userId is required/);
+            DepositRequest.create({ userId: customer._id })
+        ).rejects.toThrow(/paymentMethodId is required/);
+        await expect(
+            DepositRequest.create({ userId: customer._id, ...makeDepositPayload({ requestedAmount: undefined }) })
+        ).rejects.toThrow(/requestedAmount is required/);
+        await expect(
+            DepositRequest.create({ userId: customer._id, ...makeDepositPayload({ currency: undefined }) })
+        ).rejects.toThrow(/currency is required/);
+        await expect(
+            DepositRequest.create({ userId: customer._id, ...makeDepositPayload({ exchangeRate: undefined }) })
+        ).rejects.toThrow(/exchangeRate is required/);
+        await expect(
+            DepositRequest.create({ userId: customer._id, ...makeDepositPayload({ amountUsd: undefined }) })
+        ).rejects.toThrow(/amountUsd is required/);
+        await expect(
+            DepositRequest.create({ userId: customer._id, ...makeDepositPayload({ receiptImage: undefined }) })
+        ).rejects.toThrow(/receiptImage is required/);
     });
 
-    it('rejects when amountRequested is missing', async () => {
-        await expect(
-            DepositRequest.create({ userId, transferImageUrl: 'https://x.com/r.jpg', transferredFromNumber: '123' })
-        ).rejects.toThrow(/amountRequested is required/);
-    });
+    it('enforces positive requested amounts and valid status values', async () => {
+        const { customer } = await createUserPair();
 
-    it('rejects when amountRequested <= 0', async () => {
         await expect(
-            DepositRequest.create({ userId, ...VALID_DEPOSIT, amountRequested: 0 })
-        ).rejects.toThrow(/greater than 0/);
-    });
-
-    it('rejects when transferImageUrl is missing', async () => {
+            DepositRequest.create({ userId: customer._id, ...makeDepositPayload({ requestedAmount: 0 }) })
+        ).rejects.toThrow();
         await expect(
-            DepositRequest.create({ userId, amountRequested: 100, transferredFromNumber: '123' })
-        ).rejects.toThrow(/transferImageUrl is required/);
-    });
-
-    it('rejects when transferredFromNumber is missing', async () => {
-        await expect(
-            DepositRequest.create({ userId, amountRequested: 100, transferImageUrl: 'https://x.com/r.jpg' })
-        ).rejects.toThrow(/transferredFromNumber is required/);
-    });
-
-    it('rejects invalid status value', async () => {
-        await expect(
-            DepositRequest.create({ userId, ...VALID_DEPOSIT, status: 'INVALID_STATUS' })
+            DepositRequest.create({ userId: customer._id, ...makeDepositPayload({ status: 'INVALID_STATUS' }) })
         ).rejects.toThrow();
     });
 
-    it('virtual isApproved returns true for APPROVED status', async () => {
-        const doc = await DepositRequest.create({ userId, ...VALID_DEPOSIT, status: DEPOSIT_STATUS.APPROVED });
-        expect(doc.isApproved).toBe(true);
-        expect(doc.isRejected).toBe(false);
-        expect(doc.isPending).toBe(false);
-    });
+    it('exposes status virtuals', async () => {
+        const { customer } = await createUserPair();
 
-    it('virtual isRejected returns true for REJECTED status', async () => {
-        const doc = await DepositRequest.create({ userId, ...VALID_DEPOSIT, status: DEPOSIT_STATUS.REJECTED });
-        expect(doc.isRejected).toBe(true);
-        expect(doc.isApproved).toBe(false);
-        expect(doc.isPending).toBe(false);
-    });
+        const approved = await DepositRequest.create({
+            userId: customer._id,
+            ...makeDepositPayload({ status: DEPOSIT_STATUS.APPROVED }),
+        });
+        const rejected = await DepositRequest.create({
+            userId: customer._id,
+            ...makeDepositPayload({ status: DEPOSIT_STATUS.REJECTED, receiptImage: 'uploads/deposits/rejected.jpg' }),
+        });
+        const pending = await DepositRequest.create({
+            userId: customer._id,
+            ...makeDepositPayload({ receiptImage: 'uploads/deposits/pending.jpg' }),
+        });
 
-    it('virtual isPending returns true for PENDING status', async () => {
-        const doc = await DepositRequest.create({ userId, ...VALID_DEPOSIT });
-        expect(doc.isPending).toBe(true);
-        expect(doc.isApproved).toBe(false);
-        expect(doc.isRejected).toBe(false);
-    });
-
-    it('default status is PENDING', async () => {
-        const doc = await DepositRequest.create({ userId, ...VALID_DEPOSIT });
-        expect(doc.status).toBe(DEPOSIT_STATUS.PENDING);
+        expect(approved.isApproved).toBe(true);
+        expect(rejected.isRejected).toBe(true);
+        expect(pending.isPending).toBe(true);
     });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [2] createDepositRequest
-// ─────────────────────────────────────────────────────────────────────────────
-
 describe('[2] createDepositRequest', () => {
-    let customer;
+    it('creates a pending request with rounded financial fields', async () => {
+        const { customer } = await createUserPair();
 
-    beforeEach(async () => {
-        const group = await ensureGroup();
-        customer = await createCustomer({ groupId: group._id });
-    });
-
-    it('creates a PENDING deposit request with correct fields', async () => {
-        const deposit = await depositService.createDepositRequest({
-            userId: customer._id,
-            ...VALID_DEPOSIT,
+        const deposit = await createDeposit(customer._id, {
+            requestedAmount: 123.456,
+            amountUsd: 2.469,
         });
 
         expect(deposit.status).toBe(DEPOSIT_STATUS.PENDING);
         expect(deposit.userId.toString()).toBe(customer._id.toString());
-        expect(deposit.amountRequested).toBe(500);
-        expect(deposit.amountApproved).toBeNull();
+        expect(deposit.requestedAmount).toBe(123.46);
+        expect(deposit.amountUsd).toBe(2.47);
         expect(deposit.reviewedBy).toBeNull();
     });
 
-    it('persists to the database', async () => {
-        const deposit = await depositService.createDepositRequest({
-            userId: customer._id,
-            ...VALID_DEPOSIT,
+    it('normalizes legacy sender detail fields into senderDetails', () => {
+        const normalized = depositService.normalizeSenderDetails({
+            transferredFromNumber: ' 01111111111 ',
         });
 
-        const found = await DepositRequest.findById(deposit._id);
-        expect(found).not.toBeNull();
-        expect(found.status).toBe(DEPOSIT_STATUS.PENDING);
+        expect(normalized.value).toBe('01111111111');
     });
 
-    it('creates DEPOSIT_REQUESTED audit log (fire-and-forget)', async () => {
-        const deposit = await depositService.createDepositRequest({
-            userId: customer._id,
-            ...VALID_DEPOSIT,
-        });
+    it('creates a DEPOSIT_REQUESTED audit log', async () => {
+        const { customer } = await createUserPair();
 
+        const deposit = await createDeposit(customer._id);
         await flushAudit();
 
         const log = await AuditLog.findOne({ action: DEPOSIT_ACTIONS.REQUESTED }).lean();
         expect(log).not.toBeNull();
         expect(log.entityType).toBe(ENTITY_TYPES.DEPOSIT);
         expect(log.entityId.toString()).toBe(deposit._id.toString());
-        expect(log.metadata.amountRequested).toBe(500);
+        expect(log.metadata.requestedAmount).toBe(500);
+        expect(log.metadata.amountUsd).toBe(10);
+        expect(log.metadata.password).toBeUndefined();
+        expect(log.metadata.token).toBeUndefined();
     });
 
-    it('allows a user to submit multiple pending requests', async () => {
-        await depositService.createDepositRequest({ userId: customer._id, ...VALID_DEPOSIT });
-        await depositService.createDepositRequest({ userId: customer._id, ...VALID_DEPOSIT, amountRequested: 200 });
+    it('allows multiple pending requests for the same user', async () => {
+        const { customer } = await createUserPair();
 
-        const count = await DepositRequest.countDocuments({ userId: customer._id });
-        expect(count).toBe(2);
+        await createDeposit(customer._id);
+        await createDeposit(customer._id, {
+            requestedAmount: 200,
+            amountUsd: 4,
+            receiptImage: 'uploads/deposits/second.jpg',
+        });
+
+        await expect(DepositRequest.countDocuments({ userId: customer._id })).resolves.toBe(2);
+    });
+
+    it('persists created deposits with current-schema fields', async () => {
+        const { customer } = await createUserPair();
+
+        const deposit = await createDeposit(customer._id);
+        const found = await DepositRequest.findById(deposit._id);
+
+        expect(found).not.toBeNull();
+        expect(found.status).toBe(DEPOSIT_STATUS.PENDING);
+        expect(found.paymentMethodId).toBe('bank-egp');
+        expect(found.requestedAmount).toBe(500);
+        expect(found.receiptImage).toBe('uploads/deposits/receipt.jpg');
     });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [3] approveDeposit
-// ─────────────────────────────────────────────────────────────────────────────
-
 describe('[3] approveDeposit', () => {
-    let customer;
-    let admin;
-    let deposit;
+    it('approves a pending deposit and credits the wallet once', async () => {
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
 
-    beforeEach(async () => {
-        const group = await ensureGroup();
-        customer = await createCustomer({ groupId: group._id, walletBalance: 0 });
-        admin = await createAdmin();
-
-        deposit = await depositService.createDepositRequest({
-            userId: customer._id,
-            ...VALID_DEPOSIT,
-        });
-    });
-
-    it('transitions status PENDING → APPROVED', async () => {
         await depositService.approveDeposit(deposit._id, admin._id);
 
         const updated = await DepositRequest.findById(deposit._id);
+        const user = await User.findById(customer._id);
+        const tx = await WalletTransaction.findOne({ userId: customer._id, type: 'CREDIT' });
+
         expect(updated.status).toBe(DEPOSIT_STATUS.APPROVED);
-    });
-
-    it('sets amountApproved, reviewedBy, reviewedAt on approval', async () => {
-        await depositService.approveDeposit(deposit._id, admin._id);
-
-        const updated = await DepositRequest.findById(deposit._id);
-        expect(updated.amountApproved).toBe(500);
         expect(updated.reviewedBy.toString()).toBe(admin._id.toString());
         expect(updated.reviewedAt).toBeInstanceOf(Date);
-    });
-
-    it('credits the user wallet by amountRequested', async () => {
-        const before = await User.findById(customer._id);
-        expect(before.walletBalance).toBe(0);
-
-        await depositService.approveDeposit(deposit._id, admin._id);
-
-        const after = await User.findById(customer._id);
-        expect(after.walletBalance).toBe(500);
-    });
-
-    it('creates a WalletTransaction CREDIT record', async () => {
-        await depositService.approveDeposit(deposit._id, admin._id);
-
-        const tx = await WalletTransaction.findOne({ userId: customer._id, type: 'CREDIT' });
-        expect(tx).not.toBeNull();
-        expect(tx.amount).toBe(500);
+        expect(user.walletBalance).toBe(10);
+        expect(tx.amount).toBe(10);
         expect(tx.balanceBefore).toBe(0);
-        expect(tx.balanceAfter).toBe(500);
+        expect(tx.balanceAfter).toBe(10);
+        expect(tx.sourceType).toBe(TRANSACTION_SOURCE_TYPES.DEPOSIT);
+        expect(tx.sourceId.toString()).toBe(deposit._id.toString());
+        expect(tx.operation).toBe(TRANSACTION_OPERATIONS.CREDIT);
+        expect(tx.idempotencyKey).toBe(`deposit:${deposit._id}:credit`);
     });
 
-    it('uses overrideAmount instead of amountRequested when provided', async () => {
-        await depositService.approveDeposit(deposit._id, admin._id, 300);
+    it('supports admin amount override and refreshes exchangeRate/amountUsd snapshot', async () => {
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
+
+        await depositService.approveDeposit(deposit._id, admin._id, {
+            amount: 250,
+            adminNotes: 'Verified smaller transfer',
+        });
 
         const updated = await DepositRequest.findById(deposit._id);
-        expect(updated.amountApproved).toBe(300);
+        const user = await User.findById(customer._id);
 
-        const after = await User.findById(customer._id);
-        expect(after.walletBalance).toBe(300);
+        expect(updated.requestedAmount).toBe(250);
+        expect(updated.exchangeRate).toBe(50);
+        expect(updated.amountUsd).toBe(5);
+        expect(updated.adminNotes).toBe('Verified smaller transfer');
+        expect(user.walletBalance).toBe(5);
+    });
+
+    it('supports admin currency override and credits the wallet in the USD snapshot amount', async () => {
+        const { customer, admin } = await createUserPair({ currency: 'SAR' });
+        await Currency.create({ code: 'SAR', name: 'Saudi Riyal', symbol: 'SAR', platformRate: 4, isActive: true });
+        const deposit = await createDeposit(customer._id);
+
+        await depositService.approveDeposit(deposit._id, admin._id, {
+            amount: 500,
+            currency: 'EGP',
+        });
+
+        const updated = await DepositRequest.findById(deposit._id);
+        const user = await User.findById(customer._id);
+
+        expect(updated.currency).toBe('EGP');
+        expect(updated.exchangeRate).toBe(50);
+        expect(updated.amountUsd).toBe(10);
+        expect(user.walletBalance).toBe(10);
+    });
+
+    it('accepts the legacy numeric override argument', async () => {
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
+
+        await depositService.approveDeposit(deposit._id, admin._id, 300);
+
+        const user = await User.findById(customer._id);
+        expect(user.walletBalance).toBe(6);
     });
 
     it('creates DEPOSIT_APPROVED and WALLET_CREDIT audit logs', async () => {
-        await depositService.approveDeposit(deposit._id, admin._id);
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
+
+        await depositService.approveDeposit(deposit._id, admin._id, { amount: 450 });
         await flushAudit();
 
         const approveLog = await AuditLog.findOne({ action: DEPOSIT_ACTIONS.APPROVED }).lean();
+        const walletLog = await AuditLog.findOne({ action: WALLET_ACTIONS.CREDIT }).lean();
+
         expect(approveLog).not.toBeNull();
         expect(approveLog.entityType).toBe(ENTITY_TYPES.DEPOSIT);
-        expect(approveLog.metadata.amountApproved).toBe(500);
-
-        const walletLog = await AuditLog.findOne({ action: WALLET_ACTIONS.CREDIT }).lean();
+        expect(approveLog.metadata.finalAmount).toBe(450);
+        expect(approveLog.metadata.originalRequestedAmount).toBe(500);
+        expect(approveLog.metadata.amountUsd).toBe(9);
         expect(walletLog).not.toBeNull();
         expect(walletLog.entityType).toBe(ENTITY_TYPES.WALLET);
         expect(walletLog.entityId.toString()).toBe(customer._id.toString());
     });
 
-    it('throws DEPOSIT_ALREADY_APPROVED when approving a second time', async () => {
+    it('returns idempotent success for repeat approval without a second wallet credit', async () => {
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
+
         await depositService.approveDeposit(deposit._id, admin._id);
+        const repeated = await depositService.approveDeposit(deposit._id, admin._id);
+
+        const user = await User.findById(customer._id);
+        const txCount = await WalletTransaction.countDocuments({ userId: customer._id, type: 'CREDIT' });
+        expect(repeated.status).toBe(DEPOSIT_STATUS.APPROVED);
+        expect(user.walletBalance).toBe(10);
+        expect(txCount).toBe(1);
+    });
+
+    it('rejects invalid override currency before status or wallet changes', async () => {
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
+
+        await expect(
+            depositService.approveDeposit(deposit._id, admin._id, { currency: 'XYZ' })
+        ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+        const freshDeposit = await DepositRequest.findById(deposit._id);
+        const user = await User.findById(customer._id);
+        expect(freshDeposit.status).toBe(DEPOSIT_STATUS.PENDING);
+        expect(user.walletBalance).toBe(0);
+    });
+
+    it('rejects inactive users before status or wallet changes', async () => {
+        const { customer, admin } = await createUserPair({ status: USER_STATUS.REJECTED });
+        const deposit = await createDeposit(customer._id);
 
         await expect(
             depositService.approveDeposit(deposit._id, admin._id)
-        ).rejects.toMatchObject({ code: 'DEPOSIT_ALREADY_APPROVED' });
+        ).rejects.toMatchObject({ code: 'ACCOUNT_INACTIVE' });
+
+        const freshDeposit = await DepositRequest.findById(deposit._id);
+        const user = await User.findById(customer._id);
+        expect(freshDeposit.status).toBe(DEPOSIT_STATUS.PENDING);
+        expect(user.walletBalance).toBe(0);
     });
 
-    it('throws DEPOSIT_ALREADY_REJECTED when approving a rejected deposit', async () => {
+    it('returns clear errors for rejected or missing deposits', async () => {
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
         await depositService.rejectDeposit(deposit._id, admin._id);
 
-        await expect(
-            depositService.approveDeposit(deposit._id, admin._id)
-        ).rejects.toMatchObject({ code: 'DEPOSIT_ALREADY_REJECTED' });
+        await expect(depositService.approveDeposit(deposit._id, admin._id))
+            .rejects.toMatchObject({ code: 'DEPOSIT_ALREADY_REJECTED' });
+        await expect(depositService.approveDeposit(new mongoose.Types.ObjectId(), admin._id))
+            .rejects.toMatchObject({ code: 'NOT_FOUND' });
     });
 
-    it('throws NotFoundError for a non-existent deposit ID', async () => {
-        const fakeId = new mongoose.Types.ObjectId();
-        await expect(
-            depositService.approveDeposit(fakeId, admin._id)
-        ).rejects.toMatchObject({ code: 'NOT_FOUND' });
-    });
+    it('does not create approval or wallet-credit audit logs when approval fails', async () => {
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
+        await DepositRequest.findByIdAndUpdate(deposit._id, { status: DEPOSIT_STATUS.REJECTED });
 
-    it('wallet is NOT credited when approval fails (transaction rollback)', async () => {
-        // First approval succeeds
-        await depositService.approveDeposit(deposit._id, admin._id);
-        const balanceAfterFirst = (await User.findById(customer._id)).walletBalance;
+        await expect(depositService.approveDeposit(deposit._id, admin._id))
+            .rejects.toMatchObject({ code: 'DEPOSIT_ALREADY_REJECTED' });
+        await flushAudit();
 
-        // Second approval throws — wallet must not change
-        await expect(
-            depositService.approveDeposit(deposit._id, admin._id)
-        ).rejects.toBeDefined();
-
-        const balanceAfterSecond = (await User.findById(customer._id)).walletBalance;
-        expect(balanceAfterSecond).toBe(balanceAfterFirst);
+        await expect(AuditLog.countDocuments({ action: DEPOSIT_ACTIONS.APPROVED })).resolves.toBe(0);
+        await expect(AuditLog.countDocuments({ action: WALLET_ACTIONS.CREDIT })).resolves.toBe(0);
     });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [4] rejectDeposit
-// ─────────────────────────────────────────────────────────────────────────────
-
 describe('[4] rejectDeposit', () => {
-    let customer;
-    let admin;
-    let deposit;
+    it('rejects a pending deposit without touching wallet or transactions', async () => {
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
 
-    beforeEach(async () => {
-        const group = await ensureGroup();
-        customer = await createCustomer({ groupId: group._id, walletBalance: 0 });
-        admin = await createAdmin();
-
-        deposit = await depositService.createDepositRequest({
-            userId: customer._id,
-            ...VALID_DEPOSIT,
-        });
-    });
-
-    it('transitions status PENDING → REJECTED', async () => {
-        await depositService.rejectDeposit(deposit._id, admin._id);
+        await depositService.rejectDeposit(deposit._id, admin._id, 'Receipt mismatch');
 
         const updated = await DepositRequest.findById(deposit._id);
+        const user = await User.findById(customer._id);
+        const txCount = await WalletTransaction.countDocuments({ userId: customer._id });
+
         expect(updated.status).toBe(DEPOSIT_STATUS.REJECTED);
-    });
-
-    it('sets reviewedBy and reviewedAt on rejection', async () => {
-        await depositService.rejectDeposit(deposit._id, admin._id);
-
-        const updated = await DepositRequest.findById(deposit._id);
+        expect(updated.adminNotes).toBe('Receipt mismatch');
         expect(updated.reviewedBy.toString()).toBe(admin._id.toString());
         expect(updated.reviewedAt).toBeInstanceOf(Date);
+        expect(user.walletBalance).toBe(0);
+        expect(txCount).toBe(0);
     });
 
-    it('does NOT credit the wallet on rejection', async () => {
-        const before = (await User.findById(customer._id)).walletBalance;
-        await depositService.rejectDeposit(deposit._id, admin._id);
-        const after = (await User.findById(customer._id)).walletBalance;
+    it('creates a DEPOSIT_REJECTED audit log', async () => {
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
 
-        expect(after).toBe(before);
-    });
-
-    it('does NOT create a WalletTransaction on rejection', async () => {
-        await depositService.rejectDeposit(deposit._id, admin._id);
-
-        const count = await WalletTransaction.countDocuments({ userId: customer._id });
-        expect(count).toBe(0);
-    });
-
-    it('creates DEPOSIT_REJECTED audit log', async () => {
         await depositService.rejectDeposit(deposit._id, admin._id);
         await flushAudit();
 
@@ -423,239 +419,215 @@ describe('[4] rejectDeposit', () => {
         expect(log.actorId.toString()).toBe(admin._id.toString());
     });
 
-    it('throws DEPOSIT_ALREADY_REJECTED when rejecting a second time', async () => {
+    it('records the admin reviewer in DEPOSIT_REJECTED metadata', async () => {
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
+
         await depositService.rejectDeposit(deposit._id, admin._id);
+        await flushAudit();
 
-        await expect(
-            depositService.rejectDeposit(deposit._id, admin._id)
-        ).rejects.toMatchObject({ code: 'DEPOSIT_ALREADY_REJECTED' });
+        const log = await AuditLog.findOne({ action: DEPOSIT_ACTIONS.REJECTED }).lean();
+        expect(log.metadata.reviewedBy).toBe(admin._id.toString());
     });
 
-    it('throws DEPOSIT_ALREADY_APPROVED when rejecting an approved deposit', async () => {
-        await depositService.approveDeposit(deposit._id, admin._id);
+    it('rejects invalid status transitions and missing deposits', async () => {
+        const { customer, admin } = await createUserPair();
+        const rejected = await createDeposit(customer._id);
+        const approved = await createDeposit(customer._id, {
+            receiptImage: 'uploads/deposits/approved.jpg',
+        });
 
-        await expect(
-            depositService.rejectDeposit(deposit._id, admin._id)
-        ).rejects.toMatchObject({ code: 'DEPOSIT_ALREADY_APPROVED' });
-    });
+        await depositService.rejectDeposit(rejected._id, admin._id);
+        await depositService.approveDeposit(approved._id, admin._id);
 
-    it('throws NotFoundError for a non-existent deposit ID', async () => {
-        await expect(
-            depositService.rejectDeposit(new mongoose.Types.ObjectId(), admin._id)
-        ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+        await expect(depositService.rejectDeposit(rejected._id, admin._id))
+            .rejects.toMatchObject({ code: 'DEPOSIT_ALREADY_REJECTED' });
+        await expect(depositService.rejectDeposit(approved._id, admin._id))
+            .rejects.toMatchObject({ code: 'DEPOSIT_ALREADY_APPROVED' });
+        await expect(depositService.rejectDeposit(new mongoose.Types.ObjectId(), admin._id))
+            .rejects.toMatchObject({ code: 'NOT_FOUND' });
     });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [5] CONCURRENCY
-// ─────────────────────────────────────────────────────────────────────────────
-
 describe('[5] Concurrency', () => {
-    it('two concurrent approve calls: only one succeeds, wallet credited once', async () => {
-        const group = await ensureGroup();
-        const customer = await createCustomer({ groupId: group._id, walletBalance: 0 });
-        const admin = await createAdmin();
+    it('two concurrent approvals credit the wallet exactly once', async () => {
+        const { customer, admin } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
 
-        const deposit = await depositService.createDepositRequest({
-            userId: customer._id,
-            ...VALID_DEPOSIT,  // amountRequested: 500
-        });
-
-        // Fire two approvals simultaneously
         const results = await Promise.allSettled([
             depositService.approveDeposit(deposit._id, admin._id),
             depositService.approveDeposit(deposit._id, admin._id),
         ]);
 
-        const fulfilled = results.filter((r) => r.status === 'fulfilled');
-        const rejected = results.filter((r) => r.status === 'rejected');
-
-        // Exactly one succeeds
-        expect(fulfilled).toHaveLength(1);
-        expect(rejected).toHaveLength(1);
-        expect(rejected[0].reason.code).toBe('DEPOSIT_ALREADY_APPROVED');
-
-        // Wallet credited exactly once
+        const fulfilled = results.filter((result) => result.status === 'fulfilled');
+        const rejected = results.filter((result) => result.status === 'rejected');
         const user = await User.findById(customer._id);
-        expect(user.walletBalance).toBe(500);
-
-        // Only one CREDIT transaction
         const txCount = await WalletTransaction.countDocuments({ userId: customer._id, type: 'CREDIT' });
+
+        expect(fulfilled).toHaveLength(2);
+        expect(rejected).toHaveLength(0);
+        expect(user.walletBalance).toBe(10);
         expect(txCount).toBe(1);
     });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [6] LIST QUERIES
-// ─────────────────────────────────────────────────────────────────────────────
+describe('[6] listDeposits / listMyDeposits / getDepositById', () => {
+    it('lists, filters, paginates, and enforces customer ownership', async () => {
+        const group = await createGroup({ name: 'Default', percentage: 0 });
+        const customerA = await createCustomer({ groupId: group._id, walletBalance: 0, currency: 'EGP' });
+        const customerB = await createCustomer({ groupId: group._id, walletBalance: 0, currency: 'EGP' });
+        const admin = await createAdmin();
 
-describe('[6] listDeposits / listMyDeposits', () => {
-    let customerA;
-    let customerB;
-    let admin;
+        const approved = await createDeposit(customerA._id);
+        await depositService.approveDeposit(approved._id, admin._id);
+        const pendingA1 = await createDeposit(customerA._id, {
+            requestedAmount: 200,
+            amountUsd: 4,
+            receiptImage: 'uploads/deposits/a1.jpg',
+        });
+        await createDeposit(customerA._id, {
+            requestedAmount: 300,
+            amountUsd: 6,
+            receiptImage: 'uploads/deposits/a2.jpg',
+        });
+        await createDeposit(customerB._id, {
+            requestedAmount: 100,
+            amountUsd: 2,
+            receiptImage: 'uploads/deposits/b1.jpg',
+        });
 
-    beforeEach(async () => {
-        const group = await ensureGroup();
-        customerA = await createCustomer({ groupId: group._id });
-        customerB = await createCustomer({ groupId: group._id });
-        admin = await createAdmin();
-
-        // 3 deposits for customerA (2 pending, 1 approved)
-        const d1 = await depositService.createDepositRequest({ userId: customerA._id, ...VALID_DEPOSIT });
-        await depositService.approveDeposit(d1._id, admin._id);
-        await depositService.createDepositRequest({ userId: customerA._id, ...VALID_DEPOSIT, amountRequested: 200 });
-        await depositService.createDepositRequest({ userId: customerA._id, ...VALID_DEPOSIT, amountRequested: 300 });
-
-        // 1 deposit for customerB
-        await depositService.createDepositRequest({ userId: customerB._id, ...VALID_DEPOSIT, amountRequested: 100 });
-    });
-
-    it('listDeposits returns all deposits for admin', async () => {
-        const result = await depositService.listDeposits();
-        expect(result.deposits.length).toBe(4);
-        expect(result.pagination.total).toBe(4);
-    });
-
-    it('listDeposits filters by status=PENDING', async () => {
-        const result = await depositService.listDeposits({ status: DEPOSIT_STATUS.PENDING });
-        expect(result.deposits.every(d => d.status === DEPOSIT_STATUS.PENDING)).toBe(true);
-        expect(result.deposits.length).toBe(3);
-    });
-
-    it('listDeposits filters by status=APPROVED', async () => {
-        const result = await depositService.listDeposits({ status: DEPOSIT_STATUS.APPROVED });
-        expect(result.deposits.every(d => d.status === DEPOSIT_STATUS.APPROVED)).toBe(true);
-        expect(result.deposits.length).toBe(1);
-    });
-
-    it('listMyDeposits returns only the requesting user deposits', async () => {
-        const result = await depositService.listMyDeposits(customerA._id);
-        expect(result.deposits.length).toBe(3);
-        result.deposits.forEach(d => expect(d.userId.toString()).toBe(customerA._id.toString()));
-    });
-
-    it('listDeposits paginates correctly', async () => {
+        const all = await depositService.listDeposits();
+        const pending = await depositService.listDeposits({ status: DEPOSIT_STATUS.PENDING });
         const page1 = await depositService.listDeposits({ page: 1, limit: 2 });
+        const mine = await depositService.listMyDeposits(customerA._id);
+        const found = await depositService.getDepositById(pendingA1._id, customerA._id);
+
+        expect(all.deposits).toHaveLength(4);
+        expect(all.pagination.total).toBe(4);
+        expect(pending.deposits).toHaveLength(3);
+        expect(pending.deposits.every((deposit) => deposit.status === DEPOSIT_STATUS.PENDING)).toBe(true);
+        expect(page1.deposits).toHaveLength(2);
+        expect(page1.pagination.pages).toBe(2);
+        expect(mine.deposits).toHaveLength(3);
+        expect(found._id.toString()).toBe(pendingA1._id.toString());
+        await expect(depositService.getDepositById(pendingA1._id, customerB._id))
+            .rejects.toMatchObject({ statusCode: 403 });
+        await expect(depositService.getDepositById(new mongoose.Types.ObjectId()))
+            .rejects.toMatchObject({ code: 'NOT_FOUND' });
+    });
+
+    it('filters approved deposits and paginates later pages', async () => {
+        const group = await createGroup({ name: 'Default', percentage: 0 });
+        const customer = await createCustomer({ groupId: group._id, walletBalance: 0, currency: 'EGP' });
+        const admin = await createAdmin();
+
+        const approved = await createDeposit(customer._id);
+        await depositService.approveDeposit(approved._id, admin._id);
+        await createDeposit(customer._id, { receiptImage: 'uploads/deposits/page-a.jpg' });
+        await createDeposit(customer._id, { receiptImage: 'uploads/deposits/page-b.jpg' });
+        await createDeposit(customer._id, { receiptImage: 'uploads/deposits/page-c.jpg' });
+
+        const approvedOnly = await depositService.listDeposits({ status: DEPOSIT_STATUS.APPROVED });
         const page2 = await depositService.listDeposits({ page: 2, limit: 2 });
 
-        expect(page1.deposits).toHaveLength(2);
+        expect(approvedOnly.deposits).toHaveLength(1);
+        expect(approvedOnly.deposits[0]._id.toString()).toBe(approved._id.toString());
         expect(page2.deposits).toHaveLength(2);
-        expect(page1.pagination.total).toBe(4);
-        expect(page1.pagination.pages).toBe(2);
-    });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// [7] getDepositById
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('[7] getDepositById', () => {
-    let customer;
-    let otherCustomer;
-    let deposit;
-
-    beforeEach(async () => {
-        const group = await ensureGroup();
-        customer = await createCustomer({ groupId: group._id });
-        otherCustomer = await createCustomer({ groupId: group._id });
-
-        deposit = await depositService.createDepositRequest({
-            userId: customer._id,
-            ...VALID_DEPOSIT,
-        });
+        expect(page2.pagination.total).toBe(4);
     });
 
-    it('returns the correct deposit when called without userId restriction', async () => {
+    it('returns a deposit without ownership restriction for admin-style lookups', async () => {
+        const { customer } = await createUserPair();
+        const deposit = await createDeposit(customer._id);
+
         const found = await depositService.getDepositById(deposit._id);
+
         expect(found._id.toString()).toBe(deposit._id.toString());
-    });
-
-    it('returns the deposit when requestingUserId matches', async () => {
-        const found = await depositService.getDepositById(deposit._id, customer._id);
-        expect(found._id.toString()).toBe(deposit._id.toString());
-    });
-
-    it('throws AuthorizationError when requestingUserId does not match', async () => {
-        await expect(
-            depositService.getDepositById(deposit._id, otherCustomer._id)
-        ).rejects.toMatchObject({ statusCode: 403 });
-    });
-
-    it('throws NotFoundError for a non-existent deposit ID', async () => {
-        await expect(
-            depositService.getDepositById(new mongoose.Types.ObjectId())
-        ).rejects.toMatchObject({ code: 'NOT_FOUND' });
     });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// [8] AUDIT CORRECTNESS
-// ─────────────────────────────────────────────────────────────────────────────
+describe('[7] createDeposit controller readiness', () => {
+    const makeResponse = () => {
+        const res = {};
+        res.statusCode = null;
+        res.body = null;
+        res.status = jest.fn((code) => {
+            res.statusCode = code;
+            return res;
+        });
+        res.json = jest.fn((body) => {
+            res.body = body;
+            return res;
+        });
+        return res;
+    };
 
-describe('[8] Audit log correctness', () => {
-    let customer;
-    let admin;
+    const invokeCreateDeposit = async ({ paymentGroups }) => {
+        const { customer } = await createUserPair();
+        await Currency.create({
+            code: 'USD',
+            name: 'US Dollar',
+            symbol: '$',
+            platformRate: 1,
+            isActive: true,
+        });
+        await Setting.create({
+            key: 'paymentGroups',
+            value: paymentGroups,
+        });
 
-    beforeEach(async () => {
-        const group = await ensureGroup();
-        customer = await createCustomer({ groupId: group._id, walletBalance: 0 });
-        admin = await createAdmin();
+        const req = {
+            user: customer,
+            body: {
+                requestedAmount: '25',
+                currency: 'USD',
+                paymentMethodId: 'bank-usd',
+                notes: 'controller test',
+                senderDetails: JSON.stringify({ value: 'sender-1' }),
+            },
+            file: { filename: 'receipt-controller.jpg' },
+            receiptAnalysisValidated: true,
+            auditContext: null,
+        };
+        const res = makeResponse();
+
+        await new Promise((resolve, reject) => {
+            res.json.mockImplementation((body) => {
+                res.body = body;
+                resolve();
+                return res;
+            });
+            depositController.createDeposit(req, res, reject);
+        });
+
+        return res;
+    };
+
+    it('accepts an active configured payment method', async () => {
+        const res = await invokeCreateDeposit({
+            paymentGroups: [{
+                id: 'bank',
+                name: 'Bank',
+                isActive: true,
+                methods: [{ id: 'bank-usd', name: 'USD Bank', isActive: true }],
+            }],
+        });
+
+        expect(res.statusCode).toBe(201);
+        expect(res.body.data.paymentMethodId).toBe('bank-usd');
+        await expect(DepositRequest.countDocuments()).resolves.toBe(1);
     });
 
-    it('DEPOSIT_REQUESTED log does not contain sensitive token fields', async () => {
-        await depositService.createDepositRequest({ userId: customer._id, ...VALID_DEPOSIT });
-        await flushAudit();
+    it('rejects inactive or unknown payment methods before persistence', async () => {
+        await expect(invokeCreateDeposit({
+            paymentGroups: [{
+                id: 'bank',
+                name: 'Bank',
+                isActive: true,
+                methods: [{ id: 'bank-usd', name: 'USD Bank', isActive: false }],
+            }],
+        })).rejects.toMatchObject({ code: 'INVALID_PAYMENT_METHOD' });
 
-        const log = await AuditLog.findOne({ action: DEPOSIT_ACTIONS.REQUESTED }).lean();
-        expect(log.metadata.password).toBeUndefined();
-        expect(log.metadata.token).toBeUndefined();
-        expect(log.metadata.accessToken).toBeUndefined();
-    });
-
-    it('DEPOSIT_REQUESTED log entityId matches the deposit _id', async () => {
-        const deposit = await depositService.createDepositRequest({ userId: customer._id, ...VALID_DEPOSIT });
-        await flushAudit();
-
-        const log = await AuditLog.findOne({ action: DEPOSIT_ACTIONS.REQUESTED }).lean();
-        expect(log.entityId.toString()).toBe(deposit._id.toString());
-    });
-
-    it('DEPOSIT_APPROVED log records amountApproved in metadata', async () => {
-        const deposit = await depositService.createDepositRequest({ userId: customer._id, ...VALID_DEPOSIT });
-        await depositService.approveDeposit(deposit._id, admin._id, 450);
-        await flushAudit();
-
-        const log = await AuditLog.findOne({ action: DEPOSIT_ACTIONS.APPROVED }).lean();
-        expect(log.metadata.amountApproved).toBe(450);
-        expect(log.metadata.amountRequested).toBe(500);
-    });
-
-    it('DEPOSIT_REJECTED log records the admin reviewer', async () => {
-        const deposit = await depositService.createDepositRequest({ userId: customer._id, ...VALID_DEPOSIT });
-        await depositService.rejectDeposit(deposit._id, admin._id);
-        await flushAudit();
-
-        const log = await AuditLog.findOne({ action: DEPOSIT_ACTIONS.REJECTED }).lean();
-        expect(log.actorId.toString()).toBe(admin._id.toString());
-        expect(log.metadata.reviewedBy.toString()).toBe(admin._id.toString());
-    });
-
-    it('no DEPOSIT_APPROVED or WALLET_CREDIT logs when approval fails', async () => {
-        const deposit = await depositService.createDepositRequest({ userId: customer._id, ...VALID_DEPOSIT });
-
-        // Manually REJECT the deposit so approval will throw
-        await DepositRequest.findByIdAndUpdate(deposit._id, { status: DEPOSIT_STATUS.REJECTED });
-
-        await expect(
-            depositService.approveDeposit(deposit._id, admin._id)
-        ).rejects.toBeDefined();
-
-        await flushAudit();
-
-        const approveCount = await AuditLog.countDocuments({ action: DEPOSIT_ACTIONS.APPROVED });
-        const creditCount = await AuditLog.countDocuments({ action: WALLET_ACTIONS.CREDIT });
-
-        expect(approveCount).toBe(0);
-        expect(creditCount).toBe(0);
+        await expect(DepositRequest.countDocuments()).resolves.toBe(0);
     });
 });

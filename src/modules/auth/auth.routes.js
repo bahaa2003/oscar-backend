@@ -33,16 +33,22 @@ const authenticate = require('../../shared/middlewares/authenticate');
 const { body } = require('express-validator');
 const config = require('../../config/config');
 const { authLimiter } = require('../../shared/middlewares/rateLimiter');
+const {
+    startGoogleOAuthState,
+    consumeGoogleOAuthStateMiddleware,
+    clearGoogleOAuthBindingCookie,
+    buildGoogleOAuthFailureRedirect,
+} = require('./googleOAuthState.middleware');
 
 const router = Router();
 
 // ── Guard middleware: return 503 when Google credentials are not configured ───
 const requireGoogleConfig = (req, res, next) => {
-    if (!config.google.clientId || !config.google.clientSecret) {
+    if (!config.google.clientId || !config.google.clientSecret || !config.google.oauthStateSecret) {
         return res.status(503).json({
             success: false,
             message: 'Google OAuth is not configured on this server. ' +
-                'Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in your .env.',
+                'Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_OAUTH_STATE_SECRET in your .env.',
         });
     }
     next();
@@ -101,10 +107,12 @@ router.post(
 router.get(
     '/google',
     requireGoogleConfig,
-    passport.authenticate('google', {
+    startGoogleOAuthState,
+    (req, res, next) => passport.authenticate('google', {
         scope: ['profile', 'email'],
         session: false,
-    })
+        state: req.googleOAuthState.rawState,
+    })(req, res, next)
 );
 
 /**
@@ -115,11 +123,24 @@ router.get(
 router.get(
     '/google/callback',
     requireGoogleConfig,
-    passport.authenticate('google', {
-        session: false,
-        failureRedirect: '/api/auth/google/failure',
-    }),
+    consumeGoogleOAuthStateMiddleware,
+    (req, res, next) => passport.authenticate('google', { session: false }, (err, user) => {
+        clearGoogleOAuthBindingCookie(res);
+
+        if (err || !user) {
+            return res.redirect(buildGoogleOAuthFailureRedirect('google_auth_failed'));
+        }
+
+        req.user = user;
+        next();
+    })(req, res, next),
     authController.googleCallback
+);
+
+router.post(
+    '/google/exchange',
+    authLimiter,
+    authController.googleExchange
 );
 
 /**

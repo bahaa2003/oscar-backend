@@ -59,7 +59,11 @@ const getWallet = async (userId) => {
         .limit(20)
         .populate('reference', 'orderNumber customerInput status totalPrice');
 
-    return { user, recentTransactions };
+    return {
+        ...user.toObject({ virtuals: true }),
+        user,
+        recentTransactions,
+    };
 };
 
 // ─── Transaction history ───────────────────────────────────────────────────────

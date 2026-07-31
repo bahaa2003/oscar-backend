@@ -219,7 +219,10 @@ class AlkasrVipAdapter extends BaseProviderAdapter {
 
             // Check for explicit API-level failure
             const topStatus = String(data.status ?? '').toUpperCase();
-            if (topStatus !== 'OK' && data.success === false) {
+            if (
+                data.success === false
+                || (topStatus && topStatus !== 'OK' && _normaliseAlkasrStatus(data.status) === 'Cancelled')
+            ) {
                 return {
                     success: false,
                     providerOrderId: null,

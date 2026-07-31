@@ -39,6 +39,24 @@ const registerValidation = [
         .optional()
         .trim()
         .isLength({ max: 100 }),
+
+    body('referrerCode')
+        .optional()
+        .isString().withMessage('Referrer code must be a string')
+        .trim()
+        .isLength({ max: 32 }).withMessage('Referrer code cannot exceed 32 characters'),
+
+    body('invitationCode')
+        .optional()
+        .isString().withMessage('Invitation code must be a string')
+        .trim()
+        .isLength({ max: 32 }).withMessage('Invitation code cannot exceed 32 characters'),
+
+    body('referralCode')
+        .optional()
+        .isString().withMessage('Referral code must be a string')
+        .trim()
+        .isLength({ max: 32 }).withMessage('Referral code cannot exceed 32 characters'),
 ];
 
 const loginValidation = [
@@ -80,10 +98,27 @@ const verify2FAValidation = [
         .isNumeric().withMessage('2FA code must contain only digits'),
 ];
 
+const googleOAuthExchangeValidation = [
+    body('code')
+        .trim()
+        .notEmpty().withMessage('OAuth code is required')
+        .isString().withMessage('OAuth code must be a string')
+        .isLength({ min: 43, max: 256 }).withMessage('OAuth code length is invalid')
+        .matches(/^[A-Za-z0-9_-]+$/).withMessage('OAuth code format is invalid'),
+
+    body('codeVerifier')
+        .trim()
+        .notEmpty().withMessage('PKCE verifier is required')
+        .isString().withMessage('PKCE verifier must be a string')
+        .isLength({ min: 43, max: 128 }).withMessage('PKCE verifier length is invalid')
+        .matches(/^[A-Za-z0-9._~-]+$/).withMessage('PKCE verifier format is invalid'),
+];
+
 module.exports = {
     registerValidation,
     loginValidation,
     enable2FAValidation,
     disable2FAValidation,
     verify2FAValidation,
+    googleOAuthExchangeValidation,
 };

@@ -36,7 +36,8 @@ PROCESSING ──┬─── provider returns terminal ──────┤
 | `PENDING` | Order created; wallet debited; awaiting manual completion or automatic dispatch |
 | `PROCESSING` | Automatic order dispatched; provider has acknowledged; awaiting terminal status |
 | `COMPLETED` | Successfully fulfilled |
-| `FAILED` | Failed; wallet refunded |
+| `FAILED` | Provider or platform failure; wallet refunded |
+| `CANCELED` | Provider explicitly canceled; wallet refunded |
 
 ---
 
@@ -231,6 +232,7 @@ The `idempotencyKey` field is optional. When supplied:
 - The same request re-submitted returns `409 CONFLICT` immediately — the wallet is **not** debited again
 - A different user can reuse the same key without conflict (the uniqueness is per-user)
 - If no key is supplied, idempotency is not enforced
+- `orderNumber` uniqueness uses the partial index `unique_order_number_non_empty`, so assigned non-empty order numbers remain unique while legacy/null rows can coexist until reconciliation.
 
 **Frontend recommendation:** Generate a UUID v4 per order attempt and persist it locally. On network failure/timeout, retry with the same key.
 
@@ -242,6 +244,7 @@ The `idempotencyKey` field is optional. When supplied:
 
 Triggered when:
 - Provider returns a terminal failure status
+- Provider returns an explicit cancellation status (`Cancelled`, `canceled`, or `cancel`)
 - Retry count reaches `MAX_RETRY_COUNT` (5)
 
 ```js
@@ -255,7 +258,7 @@ await refundWalletAtomic({
 });
 order.refunded = true;   // idempotency guard
 order.refundedAt = new Date();
-order.status = ORDER_STATUS.FAILED;
+order.status = ORDER_STATUS.FAILED; // or ORDER_STATUS.CANCELED for explicit provider cancellation
 ```
 
 The `refunded` boolean flag prevents double-refunds if the same failure handler is accidentally called twice.

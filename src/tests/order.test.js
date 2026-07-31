@@ -32,6 +32,7 @@ const {
     countTransactions,
     getTransactions,
 } = require('./testHelpers');
+const { expectMoneyValue } = require('./financialAssertions');
 
 // ─── Suite Lifecycle ──────────────────────────────────────────────────────────
 
@@ -80,9 +81,9 @@ describe('Order within wallet balance', () => {
         const { order } = await placeOrder({ userId: customer._id, productId: product._id, quantity: 2 });
 
         // Order assertions
-        expect(order.totalPrice).toBe(100);
+        expectMoneyValue(order.totalPrice, 100);
         expect(order.walletDeducted).toBe(100);
-        expect(order.creditUsedAmount).toBe(0);  // always 0 — credit system removed
+        expectMoneyValue(order.creditUsedAmount, 0);
         expect(order.status).toBe('PENDING');
 
         // User balance assertions

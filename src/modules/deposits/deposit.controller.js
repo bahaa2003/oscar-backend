@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const { Currency } = require('../currency/currency.model');
+const { getPaymentSettings } = require('../admin/admin.settings.service');
 const depositService = require('./deposit.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
@@ -96,6 +97,17 @@ const createDeposit = catchAsync(async (req, res) => {
 
     const { requestedAmount, currency, paymentMethodId, notes } = req.body;
     const senderDetails = depositService.normalizeSenderDetails(req.body);
+    const paymentSettings = await getPaymentSettings();
+    const activePaymentMethod = paymentSettings.paymentGroups
+        .flatMap((group) => group.methods || [])
+        .find((method) => method.id === paymentMethodId);
+
+    if (!activePaymentMethod) {
+        throw new BusinessRuleError(
+            'Payment method is not supported or is inactive.',
+            'INVALID_PAYMENT_METHOD'
+        );
+    }
 
     // ── Fetch current exchange rate ──────────────────────────────────────
     const currencyDoc = await Currency.findOne({

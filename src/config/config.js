@@ -14,6 +14,12 @@ const parseNumber = (value, defaultValue) => {
     return Number.isFinite(numeric) ? numeric : defaultValue;
 };
 
+const parseOptionalNumber = (value) => {
+    if (value === undefined || value === null || value === '') return null;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : NaN;
+};
+
 const DEFAULT_RECEIPT_OCR_KEYWORDS = [
     'تم',
     'نجاح',
@@ -47,6 +53,22 @@ const config = {
         clientSecret: process.env.GOOGLE_CLIENT_SECRET,
         callbackUrl: process.env.GOOGLE_CALLBACK_URL ||
             `http://localhost:${process.env.PORT || 5000}/api/auth/google/callback`,
+        oauthStateSecret: process.env.GOOGLE_OAUTH_STATE_SECRET ||
+            (process.env.NODE_ENV === 'test' ? 'test-google-oauth-state-secret-change-me' : undefined),
+        oauthStateTtlMs: Math.max(
+            60 * 1000,
+            Math.min(
+                parseNumber(process.env.GOOGLE_OAUTH_STATE_TTL_MS, 10 * 60 * 1000),
+                15 * 60 * 1000
+            )
+        ),
+        oauthHandoffTtlMs: Math.max(
+            30 * 1000,
+            Math.min(
+                parseNumber(process.env.GOOGLE_OAUTH_HANDOFF_TTL_MS, 90 * 1000),
+                5 * 60 * 1000
+            )
+        ),
     },
 
     // ── Email / SMTP ────────────────────────────────────────────────────────────
@@ -95,6 +117,21 @@ const config = {
                 .filter(Boolean)
             : DEFAULT_RECEIPT_OCR_KEYWORDS,
     },
+
+    referralCommission: {
+        enabled: parseBoolean(process.env.REFERRAL_COMMISSION_ENABLED, false),
+        ratePercent: parseOptionalNumber(process.env.REFERRAL_COMMISSION_RATE_PERCENT),
+    },
+
+    referralPayout: {
+        minUsd: process.env.REFERRAL_PAYOUT_MIN_USD === undefined || process.env.REFERRAL_PAYOUT_MIN_USD === ''
+            ? '0'
+            : String(process.env.REFERRAL_PAYOUT_MIN_USD),
+    },
+
+    reseller: {
+        reapplicationCooldownDays: parseNumber(process.env.RESELLER_REAPPLICATION_COOLDOWN_DAYS, 0),
+    },
 };
 
 // Guard: fail fast if critical configs are missing
@@ -102,6 +139,36 @@ const required = ['MONGO_URI', 'JWT_SECRET'];
 const missing = required.filter((key) => !process.env[key]);
 if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+}
+
+if (
+    process.env.NODE_ENV !== 'test' &&
+    config.google.clientId &&
+    config.google.clientSecret &&
+    !config.google.oauthStateSecret
+) {
+    throw new Error('Missing required environment variable: GOOGLE_OAUTH_STATE_SECRET');
+}
+
+if (config.referralCommission.enabled) {
+    if (
+        config.referralCommission.ratePercent === null
+        || Number.isNaN(config.referralCommission.ratePercent)
+        || config.referralCommission.ratePercent < 0
+        || config.referralCommission.ratePercent > 100
+    ) {
+        throw new Error(
+            'REFERRAL_COMMISSION_RATE_PERCENT must be configured as a number between 0 and 100 when REFERRAL_COMMISSION_ENABLED is true'
+        );
+    }
+}
+
+if (!/^\d+(\.\d+)?$/.test(config.referralPayout.minUsd)) {
+    throw new Error('REFERRAL_PAYOUT_MIN_USD must be a non-negative decimal string');
+}
+
+if (config.reseller.reapplicationCooldownDays < 0) {
+    throw new Error('RESELLER_REAPPLICATION_COOLDOWN_DAYS must be a non-negative number');
 }
 
 module.exports = config;

@@ -70,10 +70,10 @@ All adapters extend `BaseProviderAdapter`. The contract methods are:
 
 | Method | Signature | Returns |
 |--------|-----------|---------|
-| `getProducts()` | `async ()` | `Array<{ externalProductId, name, price, minQty, maxQty, isActive }>` |
+| `getProducts()` | `async ()` | `Array<{ externalProductId, rawName, rawPrice, minQty, maxQty, isActive }>` where `rawPrice` is a Decimal string |
 | `placeOrder(params)` | `async ({ externalProductId, quantity, ...fields })` | Provider order object |
-| `getOrderStatus(providerOrderId)` | `async (id)` | `{ status, rawResponse }` |
-| `checkOrders(orderIds)` | `async (ids[])` | Array of `{ id, status, rawResponse }` |
+| `checkOrder(providerOrderId)` | `async (id)` | `{ providerOrderId, providerStatus, rawResponse }` |
+| `checkOrders(orderIds)` | `async (ids[])` | Array of `{ providerOrderId, providerStatus, rawResponse }` |
 | `getBalance()` | `async ()` | `{ balance, currency }` |
 
 All methods must be implemented by concrete adapters. `BaseProviderAdapter` provides `_validateDTO()` for input sanitation and common error handling.
@@ -100,30 +100,30 @@ All methods must be implemented by concrete adapters. `BaseProviderAdapter` prov
 ### TorosfonAdapter
 
 **Endpoint base:** `https://torosfon.com`
-**Authentication:** `Authorization: Bearer <apiToken>` header
+**Authentication:** `api-token: <apiToken>` header
 
 | Operation | HTTP |
 |-----------|------|
-| `getProducts()` | `GET /api/services` |
-| `placeOrder()` | `POST /api/add` |
-| `getOrderStatus()` | `GET /api/status?order=<id>` |
-| `checkOrders()` | Batch status endpoint |
-| `getBalance()` | `GET /api/account/balance` |
+| `getProducts()` | `GET /api/AllProducts` |
+| `placeOrder()` | `GET /api/PlaceOrder/{productId}/data?amount=&player_Id=&referenceId=` |
+| `checkOrder()` | `GET /api/CheckOrder?order_id=<id>` |
+| `checkOrders()` | `GET /api/CheckListOrders?orders=[...]` |
+| `getBalance()` | `GET /api/GetMyInfo` |
 
 ---
 
 ### AlkasrVipAdapter
 
 **Endpoint base:** `https://alkasr-vip.com`
-**Authentication:** `X-API-Key: <apiToken>` header
+**Authentication:** `api-token: <apiToken>` header
 
 | Operation | HTTP |
 |-----------|------|
-| `getProducts()` | `GET /v1/products` |
-| `placeOrder()` | `POST /v1/orders` |
-| `getOrderStatus()` | `GET /v1/orders/<id>` |
-| `checkOrders()` | `POST /v1/orders/batch-status` |
-| `getBalance()` | `GET /account/info` |
+| `getProducts()` | `GET /client/api/products` |
+| `placeOrder()` | `GET /client/api/newOrder/{productId}/params?qty=&playerId=&order_uuid=` |
+| `checkOrder()` | `GET /client/api/check?orders=[id]` |
+| `checkOrders()` | `GET /client/api/check?orders=[...]` |
+| `getBalance()` | `GET /client/api/profile` |
 
 ---
 
@@ -256,7 +256,8 @@ executeOrder(orderId)
     │
     ├─ Parse provider response:
     │   ├─ Terminal success (Completed/done/accept) → status = COMPLETED
-    │   ├─ Terminal failure (Cancelled/failed/error) → status = FAILED + refund
+    │   ├─ Provider cancellation (Cancelled/canceled/cancel) → status = CANCELED + refund
+    │   ├─ Terminal failure (failed/error/reject/rejected) → status = FAILED + refund
     │   └─ Non-terminal (Pending/in_process/wait)   → status = PROCESSING
     │                                                   providerOrderId = <id>
     │
@@ -270,10 +271,11 @@ The fulfillment engine uses configurable status word lists to classify provider 
 | Provider word | Mapped status |
 |---------------|---------------|
 | `Completed`, `success`, `done`, `accept` | `COMPLETED` |
-| `Cancelled`, `canceled`, `failed`, `error`, `reject`, `rejected`, `cancel` | `FAILED` |
+| `Cancelled`, `canceled`, `cancel` | `CANCELED` |
+| `failed`, `error`, `reject`, `rejected` | `FAILED` |
 | `Pending`, `in_process`, `wait` | `PROCESSING` (continues polling) |
 
-Strings are compared case-insensitively.
+Strings are compared case-insensitively. Unknown provider statuses do not throw in the fulfillment path; they map to `PROCESSING` so the order remains pollable instead of being incorrectly failed.
 
 ---
 
@@ -293,11 +295,12 @@ Sort by lastCheckedAt ASC (oldest-checked first)
     │
     ▼
 For each order:
-    adapter.getOrderStatus(providerOrderId)
+    adapter.checkOrder(providerOrderId)
     OR
     adapter.checkOrders([id1, id2, ...]) (batch, if supported)
     │
     ├─ Terminal success → COMPLETED
+    ├─ Provider cancellation → CANCELED + atomic refund
     ├─ Terminal failure → FAILED + atomic refund
     └─ Still pending    → increment retryCount + update lastCheckedAt
                          If retryCount >= MAX_RETRY_COUNT (5):

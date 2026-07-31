@@ -177,6 +177,12 @@ const updateUser = async (id, { groupId, creditLimit, name, quantityLimit }) => 
         if (groupId !== null) {
             const group = await Group.findById(groupId);
             if (!group) throw new NotFoundError('Group');
+            if (group.deletedAt) {
+                throw new BusinessRuleError(
+                    `Group '${group.name}' is deleted and cannot be assigned.`,
+                    'GROUP_DELETED'
+                );
+            }
             if (!group.isActive) {
                 throw new BusinessRuleError(
                     `Group '${group.name}' is inactive and cannot be assigned.`,

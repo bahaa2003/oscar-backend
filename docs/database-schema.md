@@ -14,6 +14,8 @@ All collections use **Mongoose ODM** over MongoDB. Unless noted, all schemas inc
 - [Order](#order)
 - [WalletTransaction](#wallettransaction)
 - [DepositRequest](#depositrequest)
+- [ReferralCommission](#referralcommission)
+- [ResellerApplication](#resellerapplication)
 - [Currency](#currency)
 - [AuditLog](#auditlog)
 - [Setting](#setting)
@@ -46,6 +48,10 @@ All collections use **Mongoose ODM** over MongoDB. Unless noted, all schemas inc
 | `creditLimit` | Number | — | Schema field retained for compatibility. Not used in business logic |
 | `creditUsed` | Number | — | Schema field retained for compatibility. Always `0` |
 | `currency` | String | — | ISO 4217, 3 letters. Default `USD` |
+| `referralCode` | String | ✅ | Own URL-safe invite code; unique partial index |
+| `referredBy` | ObjectId → User | ❌ | Referrer identity; hidden by default |
+| `referredAt` | Date | ❌ | Referral attribution timestamp; hidden by default |
+| `referralSource` | String | ❌ | `EMAIL_REGISTRATION` or `GOOGLE_OAUTH`; hidden by default |
 | `deletedAt` | Date | ❌ | Soft-delete timestamp. Null = not deleted |
 
 **Virtuals:**
@@ -61,7 +67,15 @@ status      1
 role        1
 groupId     1
 deletedAt   1 sparse
+referralCode 1 unique partial (`unique_referral_code`)
+referredBy 1 + referredAt -1
 ```
+
+**Phase 3A commercial reseller fields:**
+
+`User` also stores reseller/sub-agent commercial state. These fields are account state, not authentication roles: `resellerStatus` (`NONE`, `PENDING`, `APPROVED`, `REJECTED`, `SUSPENDED`), `resellerApprovedAt`, `resellerApprovedBy`, `resellerRejectedAt`, `resellerRejectionReason`, `resellerSuspendedAt`, `resellerSuspensionReason`, `resellerReactivatedAt`, and `resellerGroupId`. `resellerGroupId` points to the approved reseller pricing Group; `groupId` is changed transactionally on approval/suspension/reactivation.
+
+Phase 3B uses those fields only for commercial pricing. An approved reseller receives reseller pricing only when `status = ACTIVE`, `deletedAt = null`, `resellerStatus = APPROVED`, `resellerGroupId` exists, `groupId` equals `resellerGroupId`, and the referenced Group is active and not deleted. Suspended resellers must use the explicit Default Group for future orders. These fields do not create a new authentication role and do not affect referral commission or payout rates.
 
 ---
 
@@ -97,7 +111,7 @@ Admin-curated product catalogue. Decoupled from `ProviderProduct` to allow indep
 |-------|------|----------|-------|
 | `name` | String | ✅ | Unique, 2–200 chars |
 | `description` | String | ❌ | Max 2000 chars |
-| `basePrice` | Number | ✅ | USD, non-negative |
+| `basePrice` | String | ✅ | Canonical Decimal string in USD, non-negative |
 | `minQty` | Number | — | Default `1` |
 | `maxQty` | Number | — | Default `9999` |
 | `category` | String | ❌ | Free-form tag |
@@ -164,7 +178,7 @@ Raw inventory data fetched and refreshed by the sync engine. **Never exposed to 
 | `externalProductId` | String | ✅ | Provider's own product ID |
 | `rawName` | String | ✅ | Name as returned by provider API |
 | `translatedName` | String | ❌ | Admin-set friendly name. Never overwritten by sync |
-| `rawPrice` | Number | ✅ | Price as returned by provider (USD) |
+| `rawPrice` | String | ✅ | Canonical Decimal string price as returned by provider (USD) |
 | `minQty` | Number | — | Default `1` |
 | `maxQty` | Number | — | Default `9999` |
 | `isActive` | Boolean | — | Provider-reported availability |
@@ -211,17 +225,59 @@ The single most complex document. Contains full point-in-time snapshots of prici
 | `productId` | ObjectId → Product | ✅ | |
 | `quantity` | Number | ✅ | Min 1 |
 | `idempotencyKey` | String | ❌ | Sparse unique per `(userId, idempotencyKey)` |
+| `orderNumber` | String | ❌ | Unique only when assigned as a non-empty string via `unique_order_number_non_empty`; legacy/null rows remain possible. |
 
 ### Pricing Snapshots (Written Once, Immutable)
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `basePriceSnapshot` | Number | `product.basePrice` at order time |
+| `basePriceSnapshot` | String | Canonical Decimal string of `product.basePrice` at order time |
 | `markupPercentageSnapshot` | Number | `group.percentage` at order time |
-| `finalPriceCharged` | Number | `basePriceSnapshot × (1 + markup/100)` |
+| `finalPriceCharged` | String | Canonical Decimal string: `basePriceSnapshot * (1 + markup/100)` |
 | `groupIdSnapshot` | ObjectId → Group | User's group at order time |
-| `unitPrice` | Number | Alias for `finalPriceCharged` (legacy) |
-| `totalPrice` | Number | `finalPriceCharged × quantity` |
+| `unitPrice` | String | Alias for `finalPriceCharged` (legacy) |
+| `totalPrice` | String | Canonical Decimal string total charged for the order currency |
+
+Phase 3B also stores a structured immutable `pricingSnapshot` on newly created orders:
+
+```js
+{
+  pricingVersion: "reseller-pricing-v1",
+  customerCommercialSnapshot: {
+    userId,
+    resellerStatus,
+    effectiveGroupId,
+    effectiveGroupName,
+    groupPercentage,
+    pricingType
+  },
+  currencySnapshot: {
+    orderCurrency,
+    exchangeRate,
+    rateSource,
+    capturedAt
+  },
+  subtotal,
+  total,
+  subtotalUsd,
+  totalUsd,
+  items: [{
+    productId,
+    productName,
+    baseUnitPrice,
+    groupPercentage,
+    adjustmentAmount,
+    finalUnitPrice,
+    quantity,
+    lineTotal,
+    lineTotalUsd,
+    currency,
+    calculationVersion
+  }]
+}
+```
+
+The legacy snapshot fields remain for compatibility. Historical orders are not recalculated when product prices, Group percentages, user reseller state, or currency rates later change.
 | `walletDeducted` | Number | Amount taken from wallet (always = `totalPrice`) |
 | `creditUsedAmount` | Number | Always `0` (credit system removed) |
 
@@ -288,6 +344,10 @@ Immutable audit record for every wallet balance change. Never updated or deleted
 | `balanceBefore` | Number | ✅ | Balance before this transaction |
 | `balanceAfter` | Number | ✅ | Balance after this transaction |
 | `reference` | ObjectId → Order | ❌ | Source order or deposit |
+| `sourceType` | String | ❌ | Source domain, e.g. `DEPOSIT` |
+| `sourceId` | ObjectId | ❌ | Source document id |
+| `operation` | String | ❌ | Source operation, e.g. `CREDIT`, `DEBIT`, `REFUND` |
+| `idempotencyKey` | String | ❌ | Operation idempotency key, e.g. `deposit:<id>:credit` |
 | `status` | String | — | `PENDING` \| `COMPLETED` \| `FAILED`. Default `COMPLETED` |
 | `description` | String | ❌ | Max 255 chars |
 
@@ -295,7 +355,10 @@ Immutable audit record for every wallet balance change. Never updated or deleted
 ```
 userId + createdAt   compound
 reference            1
+unique_wallet_source_operation  partial unique on userId + sourceType + sourceId + operation
 ```
+
+`unique_wallet_source_operation` only applies when `sourceType`, `sourceId`, and `operation` are all present with the expected types. Legacy ledger rows without complete source identity remain possible and must be reconciled before they are treated as idempotent deposit credits.
 
 ---
 
@@ -309,22 +372,152 @@ Manual funding requests submitted by customers and reviewed by admins.
 |-------|------|----------|-------|
 | `userId` | ObjectId → User | ✅ | |
 | `status` | String | — | `PENDING` \| `APPROVED` \| `REJECTED`. Default `PENDING` |
-| `amountRequested` | Number | ✅ | > 0 |
-| `amountApproved` | Number | ❌ | Set on approval. May differ from requested amount |
-| `transferImageUrl` | String | ✅ | URL of transfer receipt screenshot (max 2048 chars) |
-| `transferredFromNumber` | String | ✅ | Sender account/phone (max 100 chars) |
+| `paymentMethodId` | String | ✅ | Active payment method id from runtime payment settings |
+| `requestedAmount` | Number | ✅ | Local-currency amount, > 0 |
+| `currency` | String | ✅ | ISO 4217 code, e.g. `USD`, `EGP`, `SAR` |
+| `exchangeRate` | Number | ✅ | Snapshotted `platformRate`; convention is 1 USD = rate units |
+| `amountUsd` | Number | ✅ | USD equivalent credited on approval |
+| `receiptImage` | String | ✅ | Relative receipt upload path (max 2048 chars) |
+| `senderDetails` | Object | ❌ | Normalized sender account/phone/address metadata |
 | `reviewedBy` | ObjectId → User | ❌ | Admin who reviewed |
 | `reviewedAt` | Date | ❌ | Timestamp of review |
+| `referralCommissionEvaluation` | Object | ❌ | Hidden by default; Phase 2C approval-time commission evaluation snapshot |
 
 **Virtuals:** `isApproved`, `isRejected`, `isPending`
 
 **State machine:** `PENDING → APPROVED` or `PENDING → REJECTED`. Both transitions are one-way.
+
+`referralCommissionEvaluation` is written inside the same approval transaction for newly approved deposits. It contains `version`, `outcome` (`CREATED`, `NOT_ELIGIBLE`, `DISABLED`), `reason`, `commissionId`, `referrerId`, `ratePercent`, `amountUsd`, and `evaluatedAt`. Legacy approved deposits may have no snapshot and are not retroactively commissioned.
 
 **Indexes:**
 ```
 status + createdAt      (admin pending queue)
 userId + createdAt -1   (customer history)
 ```
+
+---
+
+## ReferralCommission
+
+**Collection:** `referralcommissions`
+
+Immutable commission record created when an eligible referred user's deposit is approved. Phase 2C creates status `AVAILABLE`; Phase 2E payout transactions may move commissions to `LOCKED` or `PAID`.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `referrerId` | ObjectId → User | ✅ | User receiving the future commission payout |
+| `referredUserId` | ObjectId → User | ✅ | User whose deposit generated the commission |
+| `depositId` | ObjectId → DepositRequest | ✅ | Unique financial source |
+| `walletTransactionId` | ObjectId → WalletTransaction | ✅ | Wallet ledger created by the same transaction |
+| `sourceAmount` | String | ✅ | Approved deposit amount snapshot |
+| `sourceCurrency` | String | ✅ | Approved deposit currency |
+| `sourceExchangeRate` | String | ✅ | Approved exchange-rate snapshot |
+| `sourceAmountUsd` | String | ✅ | Approved USD source amount |
+| `commissionRatePercent` | String | ✅ | Trusted backend config rate snapshot |
+| `commissionAmountUsd` | String | ✅ | `sourceAmountUsd * rate / 100`, rounded 2dp |
+| `commissionCurrency` | String | ✅ | `USD` |
+| `status` | String | ✅ | `AVAILABLE`, `LOCKED`, `PAID`, `CANCELLED`; new records are `AVAILABLE` |
+| `payoutRequestId` | ObjectId → ReferralPayoutRequest | ❌ | Set only while locked/paid through a payout request |
+| `availableAt` | Date | ✅ | Deposit approval timestamp |
+| `lockedAt` / `paidAt` / `cancelledAt` | Date | ❌ | Null on Phase 2C creation |
+| `referralSource` | String | ❌ | Source copied from referred user |
+| `referredAt` | Date | ✅ | Referral attribution timestamp |
+| `calculationVersion` | String | ✅ | `v1` |
+| `policySource` | String | ✅ | `ENV_REFERRAL_COMMISSION` |
+| `idempotencyKey` | String | ✅ | `deposit:<depositId>:referral-commission:v1` |
+
+**Indexes:**
+```
+unique_referral_commission_per_deposit      unique on depositId
+unique_referral_commission_idempotency_key  unique on idempotencyKey
+referrerId + status + createdAt -1
+referredUserId + createdAt -1
+walletTransactionId
+payoutRequestId
+```
+
+No referrer wallet credit happens during deposit approval. Phase 2E payout request and settlement transactions are the only current workflow that locks commissions or marks them `PAID`. There is no cancellation endpoint, commission amount editing, or retroactive backfill.
+
+---
+
+## ReferralPayoutRequest
+
+**Collection:** `referralpayoutrequests`
+
+Payout request created by a referrer for an exact immutable set of own `AVAILABLE` commissions.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `referrerId` | ObjectId → User | ✅ | Owner of all selected commissions |
+| `commissionIds` | ObjectId[] → ReferralCommission | ✅ | Exact immutable commission set |
+| `amountUsd` | String | ✅ | Sum of persisted commission snapshots |
+| `currency` | String | ✅ | `USD` |
+| `method` | String | ✅ | `WALLET` or `MANUAL` |
+| `status` | String | ✅ | `PENDING`, `PAID`, or `REJECTED`; default `PENDING` |
+| `idempotencyKey` | String | ✅ | Server-generated key from referrer, sorted commission ids, method, and version |
+| `requestedAt` | Date | ✅ | Request creation timestamp |
+| `reviewedBy` / `reviewedAt` | ObjectId/Date | ❌ | Admin review metadata |
+| `paidAt` / `rejectedAt` | Date | ❌ | Terminal timestamps |
+| `walletTransactionId` | ObjectId → WalletTransaction | ❌ | Present only for `WALLET` settlement |
+| `externalReference` | String | ❌ | Required for `MANUAL` settlement |
+| `manualSettlementNote` | String | ❌ | Optional admin note for manual settlement |
+| `rejectionReason` | String | ❌ | Required for rejection |
+| `requestSnapshot` | Object | ✅ | Immutable commission count, ids, amount, currency, and method at request time |
+
+**Indexes:**
+```
+unique_referral_payout_idempotency_key  unique on idempotencyKey
+referrerId + status + requestedAt -1
+status + method + requestedAt -1
+```
+
+State transitions are intentionally small: `PENDING -> REJECTED` unlocks every commission back to `AVAILABLE`; `PENDING -> PAID` marks every linked commission `PAID`. `WALLET` settlement creates one idempotent wallet ledger row with `sourceType = REFERRAL_PAYOUT`; `MANUAL` settlement does not credit the wallet.
+
+---
+
+## ResellerApplication
+
+**Collection:** `resellerapplications`
+
+Commercial reseller/sub-agent application created by an active customer and reviewed by an admin/supervisor with `MANAGE_USERS`. "Sub-Agent" is a customer-facing label for the same backend `RESELLER` commercial workflow. It is not an authentication role.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `userId` | ObjectId -> User | Yes | Applicant; one pending application per user |
+| `applicationNumber` | String | Yes | Immutable generated number |
+| `status` | String | Yes | `PENDING`, `APPROVED`, `REJECTED`, `SUSPENDED`; default `PENDING` |
+| `businessName` | String | Yes | Applicant business/display name |
+| `businessType` | String | Yes | `INDIVIDUAL`, `STORE`, `AGENCY`, `OTHER` |
+| `country` / `city` | String | Yes | Normalized location strings |
+| `expectedMonthlyVolume` | String | Yes | Non-negative Decimal string snapshot |
+| `experienceSummary` | String | Yes | Admin review text |
+| `salesChannels` | String[] | No | `ONLINE`, `OFFLINE`, `SOCIAL`, `MARKETPLACE`, `OTHER` |
+| `targetMarkets` | String[] | No | Safe market labels |
+| `websiteUrl` / `socialProfileUrl` | String | No | HTTP/HTTPS URLs only |
+| `contactPhone` | String | Yes | Masked in admin serializers |
+| `preferredContactMethod` | String | Yes | `PHONE`, `WHATSAPP`, `EMAIL` |
+| `requestedGroupId` | ObjectId -> Group | No | Reserved review input; users cannot set assignment |
+| `assignedGroupId` | ObjectId -> Group | No | Reseller pricing Group assigned on approval |
+| `previousGroupId` | ObjectId -> Group | No | User's Group before approval |
+| `submittedAt` | Date | Yes | Application submission timestamp |
+| `reviewedBy` / `reviewedAt` | ObjectId/Date | No | Admin review metadata |
+| `approvedAt` / `rejectedAt` | Date | No | Terminal review timestamps |
+| `rejectionReason` | String | No | Safe applicant-visible reason |
+| `suspendedAt` / `suspensionReason` | Date/String | No | Suspension metadata |
+| `reactivatedAt` | Date | No | Latest reactivation timestamp |
+| `applicationSnapshot` | Mixed | No | Point-in-time commercial/group metadata |
+| `idempotencyKey` | String | Yes | Immutable server-generated key |
+
+**Indexes:**
+```
+unique_reseller_application_number          unique on applicationNumber
+unique_reseller_application_idempotency_key unique on idempotencyKey
+unique_pending_reseller_application_per_user partial unique on userId + status where status=PENDING
+status + submittedAt -1
+assignedGroupId + status
+```
+
+State transitions are `PENDING -> APPROVED|REJECTED`, `APPROVED -> SUSPENDED`, and `SUSPENDED -> APPROVED`. Approval/rejection/suspension/reactivation update `ResellerApplication` and `User` together in a MongoDB transaction with bounded retry. Suspension moves the user to the explicit Default Group; reactivation restores the assigned reseller Group or an admin-selected replacement. No production index creation or legacy repair is implied by this documentation.
 
 ---
 
@@ -395,13 +588,31 @@ Key-value store for runtime platform configuration. Seeded with defaults on star
 | `users` | `email` | unique |
 | `users` | `googleId` | unique sparse |
 | `users` | `status`, `role`, `groupId` | single |
+| `users` | `referralCode` | unique partial (`unique_referral_code`) |
+| `users` | `referredBy + referredAt` | compound, supports read-only invitee history |
 | `orders` | `userId + createdAt` | compound |
 | `orders` | `userId + idempotencyKey` | unique sparse |
+| `orders` | `orderNumber` | partial unique for non-empty strings only (`unique_order_number_non_empty`) |
 | `orders` | `status + providerOrderId + lastCheckedAt` | compound (cron) |
 | `providerproducts` | `provider + externalProductId` | unique |
 | `wallettransactions` | `userId + createdAt` | compound |
+| `wallettransactions` | `userId + sourceType + sourceId + operation` | partial unique (`unique_wallet_source_operation`) |
 | `depositrequests` | `status + createdAt` | compound |
 | `depositrequests` | `userId + createdAt` | compound |
+| `referralcommissions` | `depositId` | unique (`unique_referral_commission_per_deposit`) |
+| `referralcommissions` | `idempotencyKey` | unique (`unique_referral_commission_idempotency_key`) |
+| `referralcommissions` | `referrerId + status + createdAt` | compound |
+| `referralcommissions` | `referredUserId + createdAt` | compound |
+| `referralcommissions` | `walletTransactionId` | single |
+| `referralcommissions` | `payoutRequestId` | single |
+| `referralpayoutrequests` | `idempotencyKey` | unique (`unique_referral_payout_idempotency_key`) |
+| `referralpayoutrequests` | `referrerId + status + requestedAt` | compound |
+| `referralpayoutrequests` | `status + method + requestedAt` | compound |
+| `resellerapplications` | `applicationNumber` | unique (`unique_reseller_application_number`) |
+| `resellerapplications` | `idempotencyKey` | unique (`unique_reseller_application_idempotency_key`) |
+| `resellerapplications` | `userId + status` | partial unique (`unique_pending_reseller_application_per_user`) |
+| `resellerapplications` | `status + submittedAt` | compound |
+| `resellerapplications` | `assignedGroupId + status` | compound |
 
 ---
 

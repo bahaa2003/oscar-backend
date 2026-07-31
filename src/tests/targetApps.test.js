@@ -1,6 +1,7 @@
 'use strict';
 
 jest.mock('../modules/notifications/notification.service', () => ({
+    notifyNewTargetOrder: jest.fn(),
     notifyTargetApproved: jest.fn(),
     notifyTargetRejected: jest.fn(),
 }));

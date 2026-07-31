@@ -1,8 +1,26 @@
 'use strict';
 
 const { User, USER_STATUS } = require('../users/user.model');
-const { WalletTransaction, TRANSACTION_TYPES } = require('./walletTransaction.model');
+const {
+    WalletTransaction,
+    TRANSACTION_TYPES,
+    TRANSACTION_SOURCE_TYPES,
+    TRANSACTION_OPERATIONS,
+} = require('./walletTransaction.model');
 const { NotFoundError, BusinessRuleError, InsufficientFundsError } = require('../../shared/errors/AppError');
+
+let walletTestHooks = {};
+
+const __setWalletTestHooks = (hooks = {}) => {
+    walletTestHooks = hooks || {};
+};
+
+const runWalletTestHook = async (name, payload) => {
+    if (process.env.NODE_ENV !== 'test') return;
+    if (typeof walletTestHooks[name] === 'function') {
+        await walletTestHooks[name](payload);
+    }
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL HELPER
@@ -23,6 +41,10 @@ const _createTransactionRecord = async ({
     reference,
     description,
     session,
+    sourceType = null,
+    sourceId = null,
+    operation = null,
+    idempotencyKey = null,
 }) => {
     const doc = {
         userId,
@@ -31,6 +53,10 @@ const _createTransactionRecord = async ({
         balanceBefore,
         balanceAfter,
         reference,
+        sourceType,
+        sourceId,
+        operation,
+        idempotencyKey,
         status: 'COMPLETED',
         description,
     };
@@ -240,12 +266,32 @@ const refundWalletAtomic = async ({
  * Atomically credit a flat amount directly to a user's walletBalance.
  * Session is optional — works on standalone MongoDB instances.
  */
-const creditWalletDirect = async ({ userId, amount, reference = null, description = '', session }) => {
-    if (amount <= 0) {
+const creditWalletDirect = async ({
+    userId,
+    amount,
+    reference = null,
+    description = '',
+    session,
+    sourceType = null,
+    sourceId = null,
+    operation = TRANSACTION_OPERATIONS.CREDIT,
+    idempotencyKey = null,
+    requireSourceIdentity = false,
+}) => {
+    if (!Number.isFinite(amount) || amount <= 0) {
         throw new BusinessRuleError('Credit amount must be greater than zero.', 'INVALID_AMOUNT');
     }
 
+    if (requireSourceIdentity && (!sourceType || !sourceId || !operation)) {
+        throw new BusinessRuleError(
+            'Wallet credit source identity is required.',
+            'MISSING_WALLET_SOURCE_IDENTITY'
+        );
+    }
+
     const opts = session ? { new: false, session } : { new: false };
+
+    await runWalletTestHook('beforeWalletCreditUpdate', { userId, amount, reference, sourceType, sourceId, operation });
 
     const oldUser = await User.findOneAndUpdate(
         { _id: userId },
@@ -257,6 +303,17 @@ const creditWalletDirect = async ({ userId, amount, reference = null, descriptio
 
     const oldBal = Number(oldUser.walletBalance) || 0;
 
+    await runWalletTestHook('beforeWalletLedgerInsert', {
+        userId,
+        amount,
+        balanceBefore: oldBal,
+        balanceAfter: Number((oldBal + amount).toFixed(2)),
+        reference,
+        sourceType,
+        sourceId,
+        operation,
+    });
+
     const transaction = await _createTransactionRecord({
         userId,
         type: TRANSACTION_TYPES.CREDIT,
@@ -266,6 +323,10 @@ const creditWalletDirect = async ({ userId, amount, reference = null, descriptio
         reference,
         description,
         session,
+        sourceType,
+        sourceId,
+        operation,
+        idempotencyKey,
     });
 
     return { transaction };
@@ -301,4 +362,13 @@ const getTransactionHistory = async (userId, { page = 1, limit = 20 } = {}) => {
     };
 };
 
-module.exports = { debitWalletAtomic, forcedDebitWallet, refundWalletAtomic, creditWalletDirect, getTransactionHistory };
+module.exports = {
+    debitWalletAtomic,
+    forcedDebitWallet,
+    refundWalletAtomic,
+    creditWalletDirect,
+    getTransactionHistory,
+    TRANSACTION_SOURCE_TYPES,
+    TRANSACTION_OPERATIONS,
+    __setWalletTestHooks,
+};

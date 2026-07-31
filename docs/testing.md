@@ -4,7 +4,7 @@
 
 The platform has a comprehensive test suite covering every layer of the system: models, services, validators, fulfillment logic, wallet atomicity, order lifecycle, provider adapters, admin APIs, and the dynamic order fields system.
 
-**Stats:** 17 test suites | 583 tests | 100% passing
+**Stats:** Phase 4A requires the full Backend suite to be green. Current authoritative counts are recorded in `PHASE_4A_FULL_BACKEND_STABILIZATION_REPORT.md`.
 
 ---
 
@@ -233,11 +233,98 @@ Tests all three wallet operations.
 **Covers:**
 - Create deposit request
 - List pending deposits
-- Admin approve — wallet credited
+- Admin approve inside one MongoDB transaction
 - Admin reject — wallet unchanged
-- Cannot approve already-approved deposit
+- Repeated healthy approvals are idempotent and do not duplicate wallet credit
 - Cannot approve already-rejected deposit
-- `overrideAmount` used instead of `amountRequested`
+- optional admin review `amount`/`currency` correction recalculates `amountUsd`
+- wallet ledger source identity: `sourceType`, `sourceId`, `operation`, `idempotencyKey`
+- Phase 2C commission evaluation snapshot and eligible commission creation
+
+### 9b. `depositApprovalPhase2B.test.js` and preflight tests
+
+**Covers:**
+- rollback when deposit approval, wallet credit, ledger insert, commission insert, or commission evaluation snapshot update fails inside the transaction
+- bounded complete-transaction retry via `MAX_DEPOSIT_TRANSACTION_ATTEMPTS`
+- no duplicate deposit, wallet, or ledger writes after transient retry success
+- retry exhaustion leaves the deposit `PENDING`, wallet unchanged, no ledger, no approval side effects
+- validation, inactive user, invalid currency, reconciliation-required state, and unsupported topology are not retried as transient transactions
+- unknown commit result is resolved through persisted-state verification, including the Phase 2C evaluation and matching commission
+- post-commit audit and notification boundaries run once after retry success
+- `unique_wallet_source_operation` prevents duplicate complete source operations while legacy rows without source identity remain possible
+- `unique_referral_commission_per_deposit` and commission idempotency key prevent duplicate commission records
+
+### 9c. Phase 2C referral commission suites
+
+**Covers:**
+- `referralCommission.model.test.js`: required fields, `AVAILABLE` default, future statuses, decimal string snapshots, unique deposit/idempotency indexes.
+- `referralCommission.service.test.js`: trusted config, malformed rate validation, eligibility rules, decimal.js calculations, zero-value skips, reseller separation, and read-only query summaries.
+- `depositReferralCommissionPhase2C.test.js`: same-transaction commission creation, ineligible approvals, rollback, duplicate conflicts, repeat approval, concurrency, unknown commit, legacy non-backfill, retry side effects, and no referrer wallet credit.
+
+### 9d. Phase 2D referral dashboard API suite
+
+**Covers:**
+- `referralDashboardPhase2D.test.js`: authenticated `/api/referrals/me/dashboard`, `/commissions`, and `/invitees` routes.
+- Dashboard summary returns the user's own referral code, relative invite path, referred-user count, Decimal string totals by commission status, and empty-account zeros.
+- Commission history is isolated to the current referrer, supports status/date/page/limit filters, preserves stable ordering, and hides sensitive/internal fields.
+- Invitee history is isolated to the current referrer, excludes deleted users, exposes masked email only, supports source/date/page/limit filters, and groups commission totals without N+1 commission queries.
+- Authorization rejects unauthenticated or inactive users and rejects client-supplied ownership overrides such as `referrerId`.
+- The dashboard summary, commission history, and invitee APIs remain read-only. Phase 2E adds separate payout request routes for selected own `AVAILABLE` commissions.
+
+### 9e. Phase 2E referral payout suites
+
+**Covers:**
+- `referralPayoutPhase2E.test.js`: `ReferralPayoutRequest` model defaults/unique idempotency, user payout creation, exact commission locking, repeated request idempotency, rejection unlock, WALLET settlement wallet-credit idempotency, MANUAL settlement without wallet credit, authorization, admin RBAC, rollback, and unsafe selection rejection.
+- `referralPayoutPreflightScripts.test.js`: read-only payout reconciliation classifier states.
+- Payout request creation uses one transaction for `ReferralPayoutRequest(PENDING)` plus `AVAILABLE -> LOCKED` commission updates.
+- Admin rejection uses one transaction for payout `REJECTED` plus `LOCKED -> AVAILABLE` commission unlock.
+- Admin `WALLET` settlement uses one transaction for referrer wallet credit, one `WalletTransaction`, `LOCKED -> PAID` commissions, and payout `PAID`.
+- Admin `MANUAL` settlement requires an external reference, marks commissions/payout `PAID`, and creates no wallet credit or wallet ledger.
+- Unknown commit and duplicate/idempotent paths verify persisted payout, commission, and ledger state rather than blindly repeating financial writes.
+
+### 9f. Phase 3A reseller/sub-agent application suite
+
+**Covers:**
+- `resellerApplicationPhase3A.test.js`: model defaults, unique application/idempotency indexes, partial unique pending application per user, user submit/current/history APIs, duplicate and concurrent submissions, client-supplied state stripping, admin list/details RBAC, approval and Group assignment transaction, rejection, suspension to the explicit Default Group, reactivation with restore/replacement Group, bounded retry, rollback with no post-commit side effects, and non-regression for referral attribution, commissions, payouts, and auth roles.
+- `defaultGroup.test.js`: explicit Default Group selection and protection, required by reseller suspension.
+- Phase 3A targeted gate:
+```bash
+npm.cmd test -- resellerApplicationPhase3A.test.js defaultGroup.test.js
+
+## Phase 3B — Reseller Pricing and Order Snapshots
+
+Targeted gate:
+
+```bash
+npm.cmd test -- --silent src/tests/resellerPricingPhase3B.test.js src/tests/pricing.test.js src/tests/order.test.js src/tests/resellerApplicationPhase3A.test.js
+```
+
+Coverage includes the existing Group markup formula, approved/suspended/malformed reseller pricing context, catalog serialization, quote API totals, price-tampering rejection, admin pricing preview, immutable order-level and item-level `pricingSnapshot`, idempotent duplicate order submission, preflight classifiers, and non-regression that referral commissions and payouts are not changed by `Group.percentage`.
+
+Read-only preflight command:
+
+```bash
+node scripts/resellerPricingReconciliationPreflight.js --check
+```
+
+The preflight is aggregate/read-only, requires `--check`, does not create indexes, does not update users/products/orders, and must not be run on production/staging without explicit authorization.
+```
+
+Read-only preflight scripts require explicit `--check` and do not create indexes or repair legacy data:
+
+```bash
+node scripts/financialTopologyPreflight.js --check
+node scripts/walletLedgerIdempotencyPreflight.js --check
+node scripts/depositApprovalReconciliationPreflight.js --check
+node scripts/referralPayoutReconciliationPreflight.js --check
+node scripts/resellerApplicationReconciliationPreflight.js --check
+node scripts/resellerPricingReconciliationPreflight.js --check
+node scripts/systemReadinessPreflight.js --check
+```
+
+`systemReadinessPreflight.js` aggregates MongoDB transaction topology, Default Group readiness, referral/wallet/commission/payout/reseller pricing indexes, duplicate/null order-number risks, order pricing snapshots, and required configuration presence. It prints aggregate status only, does not print connection URIs or credentials, and must not be run on production/staging without explicit authorization.
+
+Production/staging result for this closure: `NOT RUN - No explicitly authorized safe production/staging database was supplied.`
 
 ---
 
@@ -437,3 +524,15 @@ const result = applyProviderMapping(
 );
 // result = { link: 'hero_123', server_id: 'EU' }
 ```
+
+---
+
+## Phase 4A Stabilization Suites
+
+`provider.test.js`, `catalog.test.js`, `fulfillment.test.js`, `orderPolling.test.js`, `targetApps.test.js`, and `adapters.test.js` verify the stabilized contracts:
+- provider/catalog money fields are Decimal strings
+- provider cancellation persists `ORDER_STATUS.CANCELED` and still refunds once
+- unknown provider status remains `PROCESSING` for safe repolling
+- multiple legacy/null `orderNumber` values do not violate the assigned-order-number unique index
+- target-order notification wrappers are mocked explicitly in tests
+- Torosfon and Alkasr adapter tests use their provider-specific GET endpoints and deterministic mocks

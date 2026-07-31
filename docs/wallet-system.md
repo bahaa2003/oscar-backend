@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every user has an embedded wallet (`walletBalance` on the `User` document). All financial operations — order debits, refunds, and deposit credits — are implemented as single atomic MongoDB aggregation-pipeline updates, eliminating all race conditions without requiring a distributed lock.
+Every user has an embedded wallet (`walletBalance` on the `User` document). Wallet balance changes use atomic MongoDB writes and every completed balance change creates a `WalletTransaction`. Deposit approval now uses one MongoDB transaction for the PENDING deposit claim, final financial validation, approval snapshot update, wallet balance credit, `WalletTransaction` insert, referral commission evaluation, and eligible `ReferralCommission` insert.
 
 ---
 
@@ -11,7 +11,7 @@ Every user has an embedded wallet (`walletBalance` on the `User` document). All 
 1. **Wallet-only policy** — orders succeed only when `walletBalance >= orderAmount`. The balance can never go negative.
 2. **Atomic operations** — every balance change is a single `findOneAndUpdate` with an aggregation pipeline. The check and the update are inseparable.
 3. **Immutable audit trail** — every balance change creates a `WalletTransaction` document that is never modified after creation.
-4. **Session-scoped** — all wallet functions require a `ClientSession`. They must be called inside a MongoDB transaction so the balance change and the associated document write (order, deposit) are atomic.
+4. **Session propagation** - wallet functions accept an optional `ClientSession` and propagate it to their writes when supplied. Deposit approval requires MongoDB transactions and has no unsafe non-transaction fallback.
 
 ---
 
@@ -70,7 +70,7 @@ If the `findOneAndUpdate` returns `null`:
 
 ### 2. `refundWalletAtomic` — Order Refunds
 
-Called when an order fails (during fulfillment or via admin action).
+Called when an order fails, is explicitly canceled by the provider, or is failed by an admin action.
 
 ```js
 const { transaction } = await refundWalletAtomic({
@@ -113,7 +113,7 @@ Called when an admin approves a deposit request.
 ```js
 const { transaction } = await creditWalletDirect({
     userId,
-    amount,         // amountApproved (may differ from amountRequested)
+    amount,         // approved USD amount credited to the wallet
     reference,      // depositRequest._id
     description,    // "Deposit approved by admin"
     session,
@@ -238,6 +238,8 @@ chargedAmount = usdAmount × rateSnapshot
 
 The wallet is debited `chargedAmount` in the user's currency. All three values are frozen on the order document.
 
+Phase 3B resolves `finalPriceUSD` through the backend commercial pricing resolver. Approved resellers use their valid assigned active Group; suspended resellers do not retain reseller pricing for future orders. The client may display quote previews but cannot submit authoritative prices, totals, Groups, percentages, reseller state, or exchange rates. New orders store immutable `pricingSnapshot` and currency snapshots so refunds and history do not depend on later product, Group, currency, or reseller-state changes.
+
 ### Currency Conversion Example
 
 ```
@@ -258,9 +260,11 @@ The user's wallet is debited **43.09 SAR**.
 
 ```
 Customer POSTs deposit request
-    amountRequested: 100
-    transferredFromNumber: "+1-555-0100"
-    screenshotProof: <file>    ← multer uploads to /uploads/
+    requestedAmount: 100
+    currency: "EGP"
+    paymentMethodId: "vodafone-cash"
+    senderDetails: { value: "+1-555-0100" }
+    receipt: <file>    ← multer uploads to /uploads/deposits/
               │
               ▼
 DepositRequest created (status=PENDING)
@@ -268,19 +272,24 @@ DepositRequest created (status=PENDING)
     (Admin reviews uploaded screenshot)
               │
               ▼
-Admin: PATCH /api/admin/deposits/:id/approve
-    { overrideAmount: 95 }    ← optional amount override
+Admin: PATCH /api/admin/deposits/:id/review
+    { status: "APPROVED", amount: 95, currency: "EGP" }    ← optional amount/currency correction
               │
-              ▼ Inside MongoDB session:
-    creditWalletDirect({ userId, amount: 95 })
+              ▼ Phase 2C MongoDB transaction:
     DepositRequest.status = APPROVED
-    DepositRequest.amountApproved = 95
+    DepositRequest.amountUsd = 1.90
     DepositRequest.reviewedBy = adminId
     DepositRequest.reviewedAt = now
-    AuditLog written
+    creditWalletDirect({ userId, amount: amountUsd, session, source identity })
+    WalletTransaction inserted with the same session
+    ReferralCommission inserted with the same session when eligible
+    DepositRequest.referralCommissionEvaluation stored with the same session
+              │
+              ▼ Commit
+    AuditLog and notification run after commit only
               │
               ▼
-User wallet balance += 95
+User wallet balance += amountUsd
 WalletTransaction (CREDIT) created
 ```
 
@@ -300,10 +309,11 @@ Admin: PATCH /api/admin/deposits/:id/reject
 | Invariant | Enforced By |
 |-----------|-------------|
 | `walletBalance >= 0` | Atomic update filter: `walletBalance: { $gte: amount }` |
-| No double-debit per order | MongoDB transaction rolls back entire session on error |
+| No double-debit per order | Atomic wallet update filter and order lifecycle guards |
 | No double-refund | `order.refunded` boolean checked before `refundWalletAtomic()` |
-| No double-deposit-approval | `DepositRequest.status` checked; `ALREADY_APPROVED` error thrown |
+| No double-deposit-approval | Healthy repeated approvals return idempotent success without another credit |
 | All money changes audited | `_createTransactionRecord` called inside every wallet function |
+| Deposit source identity | `sourceType`, `sourceId`, `operation`, and `idempotencyKey` are mandatory for deposit wallet credits |
 
 ---
 
@@ -321,6 +331,36 @@ Two simultaneous orders from the same user both reach `debitWalletAtomic`. Mongo
 
 Both `debitWalletAtomic` and `creditWalletDirect` throw `BusinessRuleError('INVALID_AMOUNT')` if `amount <= 0`, preventing silent no-ops.
 
-### Session Requirement
+### Session Propagation
 
-All three wallet functions hard-require `session`. If called without one, they throw `BusinessRuleError('SESSION_REQUIRED')` immediately — preventing unchecked balance changes outside of MongoDB transactions.
+The wallet helpers do not hard-require `session` for all call sites. When a session is supplied, it is passed to the user update and the `WalletTransaction` insert. Deposit approval supplies the same session to the deposit write, user read/write, currency read when an override requires it, wallet ledger insert, commission eligibility reads, commission insert, and evaluation snapshot update.
+
+### Wallet Source Idempotency
+
+Deposit credits write:
+
+- `sourceType = DEPOSIT`
+- `sourceId = <depositId>`
+- `operation = CREDIT`
+- `idempotencyKey = deposit:<depositId>:credit`
+
+The `unique_wallet_source_operation` index is a partial unique index on `{ userId, sourceType, sourceId, operation }`. It applies only when complete source identity exists, so legacy ledger rows without source identity remain possible. An approved deposit without a matching ledger, a pending deposit with a credit ledger, duplicate ledgers, amount mismatches, or Phase 2C commission mismatches require manual reconciliation.
+
+### Referral Commission Records
+
+When `REFERRAL_COMMISSION_ENABLED=true` and `REFERRAL_COMMISSION_RATE_PERCENT` is a valid configured rate greater than zero, a newly approved eligible referred user's deposit creates one `ReferralCommission` inside the same deposit transaction. The commission snapshots the referrer, referred user, deposit id, wallet transaction id, source amount/currency/exchange rate/USD amount, rate, calculated USD commission, referral source, referred-at timestamp, policy source, and calculation version `v1`.
+
+New commissions are created with status `AVAILABLE`. Deposit approval does not credit the referrer's wallet and does not create a referrer `WalletTransaction`. Repeat approval reads the stored `referralCommissionEvaluation` snapshot; it does not re-evaluate current referrer status or the current configured rate.
+
+### Referral Payout Wallet Credits
+
+Phase 2E adds payout settlement as a separate admin-reviewed workflow. Creating a payout request does not change wallet balance; it creates `ReferralPayoutRequest(PENDING)` and locks selected commissions `AVAILABLE -> LOCKED` in one transaction. Rejection unlocks commissions back to `AVAILABLE` without wallet credit.
+
+Only `WALLET` settlement credits the referrer's wallet. That transaction updates `User.walletBalance`, inserts exactly one `WalletTransaction`, marks linked commissions `PAID`, and marks the payout `PAID` with the same MongoDB session. The wallet ledger source identity is:
+
+- `sourceType = REFERRAL_PAYOUT`
+- `sourceId = <referralPayoutRequestId>`
+- `operation = CREDIT`
+- `idempotencyKey = referral-payout:<referralPayoutRequestId>:credit`
+
+`MANUAL` settlement records a confirmed external reference, marks linked commissions and the payout `PAID`, and never credits the wallet or inserts a wallet ledger row. External payment-provider execution is outside the backend.

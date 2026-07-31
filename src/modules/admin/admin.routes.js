@@ -106,6 +106,11 @@ const groupSvc = require('../groups/group.service');
 const { Currency } = require('../currency/currency.model');
 const { getEntityAuditLogs, getActorAuditLogs } = require('../audit/audit.service');
 const depositSvc = require('../deposits/deposit.service');
+const referralPayoutCtrl = require('../referrals/referralPayout.admin.controller');
+const resellerApplicationCtrl = require('../resellerApplications/resellerApplication.controller');
+const resellerApplicationValidation = require('../resellerApplications/resellerApplication.validation');
+const pricingCtrl = require('../pricing/pricing.controller');
+const pricingValidation = require('../pricing/pricing.validation');
 const targetSvc = require('../targets/target.service');
 const targetValidation = require('../targets/target.validation');
 const notifSvc = require('../notifications/notification.service');
@@ -182,6 +187,15 @@ router.post('/orders/:id/sync-status', requirePermission('CONFIRM_ORDERS'), orde
 router.post('/orders/:id/complete', requirePermission('CONFIRM_ORDERS'), ordersCtrl.completeOrder);
 router.patch('/orders/:id/status', requirePermission('CONFIRM_ORDERS'), validateBody(schemas.updateOrderStatus), ordersCtrl.updateStatus);
 router.get('/orders/:id', requirePermission('MANAGE_ORDERS'), ordersCtrl.getOrderById);
+
+// Read-only Phase 3B pricing diagnostic. It does not mutate users, groups, products, or orders.
+router.get(
+    '/reseller-pricing/preview',
+    requirePermission('MANAGE_USERS'),
+    pricingValidation.adminPreviewValidation,
+    require('../../shared/middlewares/validate'),
+    pricingCtrl.adminPreview
+);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WALLETS
@@ -275,18 +289,19 @@ router.get('/groups', catchAsync(async (req, res) => {
 }));
 
 router.post('/groups', requirePermission('MANAGE_GROUPS'), validateBody(schemas.createGroup), catchAsync(async (req, res) => {
-    const { name, percentage, billingMode } = req.body;
-    const group = await groupSvc.createGroup({ name, percentage, billingMode });
+    const { name, percentage, billingMode, isActive, isDefault } = req.body;
+    const group = await groupSvc.createGroup({ name, percentage, billingMode, isActive, isDefault });
     res.status(201).json({ success: true, message: 'Group created', data: { group } });
 }));
 
 router.patch('/groups/:id', requirePermission('MANAGE_GROUPS'), validateBody(schemas.updateGroup), catchAsync(async (req, res) => {
-    const { name, percentage, isActive, billingMode } = req.body;
+    const { name, percentage, isActive, billingMode, isDefault } = req.body;
     const group = await groupSvc.updateGroup(req.params.id, {
         name,
         percentage,
         isActive,
         billingMode,
+        isDefault,
     });
     sendSuccess(res, { group }, 'Group updated');
 }));
@@ -380,6 +395,43 @@ router.patch('/deposits/:id', requirePermission('MANAGE_DEPOSITS'), validateBody
     const deposit = await depositSvc.updatePendingDeposit(req.params.id, req.body, req.user._id);
     sendSuccess(res, { deposit }, 'Deposit request updated');
 }));
+
+router.get(
+    '/reseller-applications',
+    requirePermission('MANAGE_USERS'),
+    resellerApplicationValidation.validateQuery(resellerApplicationValidation.schemas.adminListQuery),
+    resellerApplicationCtrl.listForAdmin
+);
+router.get('/reseller-applications/:id', requirePermission('MANAGE_USERS'), resellerApplicationCtrl.getForAdmin);
+router.post(
+    '/reseller-applications/:id/approve',
+    requirePermission('MANAGE_USERS'),
+    resellerApplicationValidation.validateBody(resellerApplicationValidation.schemas.approveApplication),
+    resellerApplicationCtrl.approve
+);
+router.post(
+    '/reseller-applications/:id/reject',
+    requirePermission('MANAGE_USERS'),
+    resellerApplicationValidation.validateBody(resellerApplicationValidation.schemas.rejectApplication),
+    resellerApplicationCtrl.reject
+);
+router.post(
+    '/reseller-applications/:id/suspend',
+    requirePermission('MANAGE_USERS'),
+    resellerApplicationValidation.validateBody(resellerApplicationValidation.schemas.suspendApplication),
+    resellerApplicationCtrl.suspend
+);
+router.post(
+    '/reseller-applications/:id/reactivate',
+    requirePermission('MANAGE_USERS'),
+    resellerApplicationValidation.validateBody(resellerApplicationValidation.schemas.reactivateApplication),
+    resellerApplicationCtrl.reactivate
+);
+
+router.get('/referral-payouts', requirePermission('MANAGE_WALLET'), validateQuery(schemas.listReferralPayouts), referralPayoutCtrl.listPayouts);
+router.get('/referral-payouts/:id', requirePermission('MANAGE_WALLET'), referralPayoutCtrl.getPayout);
+router.post('/referral-payouts/:id/reject', requirePermission('MANAGE_WALLET'), validateBody(schemas.rejectReferralPayout), referralPayoutCtrl.rejectPayout);
+router.post('/referral-payouts/:id/settle', requirePermission('MANAGE_WALLET'), validateBody(schemas.settleReferralPayout), referralPayoutCtrl.settlePayout);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AUDIT LOGS

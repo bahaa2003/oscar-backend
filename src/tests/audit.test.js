@@ -438,7 +438,7 @@ describe('[5] Integration – Order refund', () => {
 
         expect(refundLog).not.toBeNull();
         expect(refundLog.entityId.toString()).toBe(order._id.toString());
-        expect(refundLog.metadata.totalRefunded).toBe(100);
+        expect(refundLog.metadata.totalRefund).toBe(100);
 
         expect(creditLog).not.toBeNull();
         expect(creditLog.entityId.toString()).toBe(customer._id.toString());
@@ -484,7 +484,7 @@ describe('[5b] Integration – Manual order review', () => {
 
 describe('[6] Integration – Auth events', () => {
     beforeEach(async () => {
-        await createGroup({ name: 'Default', percentage: 0 });
+        await createGroup({ name: 'Default', percentage: 0, isDefault: true });
     });
 
     it('register creates USER_REGISTERED log', async () => {
@@ -505,7 +505,10 @@ describe('[6] Integration – Auth events', () => {
 
         // Mark as email-verified so the PENDING status gate is reached
         // (this test is specifically about the admin-approval blocked path)
-        await User.findOneAndUpdate({ email }, { verified: true });
+        await User.findOneAndUpdate({ email }, {
+            verified: true,
+            status: USER_STATUS.PENDING,
+        });
 
         await flushAudit();
         await AuditLog.collection.deleteMany({});  // isolate

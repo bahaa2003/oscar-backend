@@ -8,6 +8,10 @@ const { ProviderProduct } = require('../providers/providerProduct.model');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('./order.model');
 const { debitWalletAtomic, refundWalletAtomic } = require('../wallet/wallet.service');
 const { calculateUserPrice } = require('./pricing.service');
+const {
+    calculateProductPrice: calculateCommercialProductPrice,
+    createOrderPricingSnapshot,
+} = require('../pricing/commercialPricing.service');
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { validateOrderFields } = require('./orderFields.validator');
 const {
@@ -642,7 +646,8 @@ const _attemptCreateOrder = async (
             }
 
             // ── Determine execution type & initial status ────────────────────
-            const isAutomatic = product.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC;
+            const isAutomatic = product.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC
+                && Boolean(provider || providerCode || product.provider);
             const initialStatus = isAutomatic ? ORDER_STATUS.PROCESSING : ORDER_STATUS.PENDING;
 
             const orderId = new mongoose.Types.ObjectId();
@@ -672,6 +677,40 @@ const _attemptCreateOrder = async (
                 rateSnapshot: 1,
                 usdAmount: '0',
                 chargedAmount: 0,
+                pricingSnapshot: {
+                    pricingVersion: 'reseller-pricing-v1',
+                    customerCommercialSnapshot: {
+                        userId: String(userId),
+                        resellerStatus: updatedUser.resellerStatus || null,
+                        effectiveGroupId: userGroupDoc?._id ? String(userGroupDoc._id) : null,
+                        effectiveGroupName: userGroupDoc?.name || null,
+                        groupPercentage: '0',
+                        pricingType: 'QUANTITY_ONLY',
+                    },
+                    currencySnapshot: {
+                        orderCurrency: 'USD',
+                        exchangeRate: 1,
+                        rateSource: 'QUANTITY_ONLY',
+                        capturedAt: new Date(),
+                    },
+                    subtotal: '0',
+                    total: '0',
+                    subtotalUsd: '0',
+                    totalUsd: '0',
+                    items: [{
+                        productId: String(product._id),
+                        productName: product.name,
+                        baseUnitPrice: '0',
+                        groupPercentage: '0',
+                        adjustmentAmount: '0',
+                        finalUnitPrice: '0',
+                        quantity: qty,
+                        lineTotal: '0',
+                        lineTotalUsd: '0',
+                        currency: 'USD',
+                        calculationVersion: 'reseller-pricing-v1',
+                    }],
+                },
             };
             if (idempotencyKey) orderData.idempotencyKey = idempotencyKey;
 
@@ -797,6 +836,13 @@ const _attemptCreateOrder = async (
         // ── FINAL ROUNDING — only place we round to 2dp ────────────────────
         const chargedAmount = toFiat(conversion.finalAmount);
         const rateSnapshot = conversion.rate;
+        const productPricingSnapshot = calculateCommercialProductPrice({
+            product,
+            pricingContext: pricing.pricingContext,
+            quantity: qty,
+            currency: userCurrency,
+            exchangeRate: rateSnapshot,
+        });
 
         // ── 3c. FINAL PRICE GUARD ──────────────────────────────────────────────
         // Prevent NaN / Infinity / zero from reaching the wallet debit.
@@ -824,7 +870,8 @@ const _attemptCreateOrder = async (
         // ── 5. Determine initial status & execution type ───────────────────────
         // An AUTOMATIC product → PROCESSING (fulfillment attempted post-commit)
         // Any other case        → PENDING   (admin handles manually)
-        const isAutomatic = product.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC;
+        const isAutomatic = product.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC
+            && Boolean(provider || providerCode || product.provider);
         const initialStatus = isAutomatic ? ORDER_STATUS.PROCESSING : ORDER_STATUS.PENDING;
 
         // ── 6. Create Order ────────────────────────────────────────────────────
@@ -854,6 +901,13 @@ const _attemptCreateOrder = async (
             rateSnapshot,
             usdAmount: usdTotalPrice,
             chargedAmount,
+            pricingSnapshot: createOrderPricingSnapshot({
+                pricingContext: pricing.pricingContext,
+                orderCurrency: userCurrency,
+                exchangeRate: rateSnapshot,
+                productPricing: productPricingSnapshot,
+                profitUsd,
+            }),
         };
         if (idempotencyKey) orderData.idempotencyKey = idempotencyKey;
 

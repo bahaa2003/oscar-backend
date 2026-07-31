@@ -417,6 +417,96 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         return { order: await Order.findById(orderId), placed: true, refunded: false };
     }
 
+    if (newStatus === ORDER_STATUS.CANCELED) {
+        await Order.findByIdAndUpdate(orderId, {
+            $set: {
+                status: ORDER_STATUS.CANCELED,
+                providerOrderId: result.providerOrderId,
+                providerStatus: result.providerStatus,
+                providerRawResponse: result.rawResponse,
+                failedAt: now,
+                lastCheckedAt: now,
+            },
+        });
+
+        createAuditLog({
+            actorId, actorRole, ipAddress, userAgent,
+            action: PROVIDER_ACTIONS.ORDER_CANCELLED,
+            entityType: ENTITY_TYPES.ORDER,
+            entityId: orderId,
+            metadata: {
+                orderId: orderId.toString(),
+                providerOrderId: result.providerOrderId,
+                providerStatus: result.providerStatus,
+                rawResponse: result.rawResponse,
+            },
+        });
+
+        createAuditLog({
+            actorId, actorRole, ipAddress, userAgent,
+            action: ORDER_ACTIONS.CANCELED,
+            entityType: ENTITY_TYPES.ORDER,
+            entityId: orderId,
+            metadata: { orderId: orderId.toString(), reason: 'PROVIDER_CANCELLED' },
+        });
+
+        try {
+            const freshOrder = await Order.findById(orderId);
+            refundIssued = await refundFailedOrder(freshOrder);
+        } catch (refundErr) {
+            console.error(`[Fulfillment] Refund FAILED for canceled order ${orderId}:`, refundErr.message);
+        }
+
+        notifyOrderFailed(await Order.findById(orderId).catch(() => null));
+
+        return { order: await Order.findById(orderId), placed: false, refunded: refundIssued };
+    }
+
+    if (newStatus !== ORDER_STATUS.COMPLETED) {
+        await Order.findByIdAndUpdate(orderId, {
+            $set: {
+                status: ORDER_STATUS.FAILED,
+                providerOrderId: result.providerOrderId,
+                providerStatus: result.providerStatus,
+                providerRawResponse: result.rawResponse,
+                failedAt: now,
+                lastCheckedAt: now,
+            },
+        });
+
+        createAuditLog({
+            actorId, actorRole, ipAddress, userAgent,
+            action: PROVIDER_ACTIONS.ORDER_PLACE_FAILED,
+            entityType: ENTITY_TYPES.ORDER,
+            entityId: orderId,
+            metadata: {
+                orderId: orderId.toString(),
+                errorMessage: result.errorMessage,
+                providerStatus: result.providerStatus,
+                rawResponse: result.rawResponse,
+            },
+        });
+
+        createAuditLog({
+            actorId, actorRole, ipAddress, userAgent,
+            action: ORDER_ACTIONS.FAILED,
+            entityType: ENTITY_TYPES.ORDER,
+            entityId: orderId,
+            metadata: { orderId: orderId.toString(), reason: 'PROVIDER_STATUS_FAILED' },
+        });
+
+        try {
+            const freshOrder = await Order.findById(orderId);
+            refundIssued = await refundFailedOrder(freshOrder);
+        } catch (refundErr) {
+            console.error(`[Fulfillment] Refund FAILED for failed order ${orderId}:`, refundErr.message);
+        }
+
+        notifyOrderFailed(await Order.findById(orderId).catch(() => null));
+
+        return { order: await Order.findById(orderId), placed: false, refunded: refundIssued };
+    }
+
     // Case A: Completed immediately
     await Order.findByIdAndUpdate(orderId, {
         $set: {

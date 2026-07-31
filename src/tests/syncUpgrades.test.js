@@ -148,21 +148,36 @@ describe('[1] runWithConcurrency() — pure concurrency helper', () => {
         expect(maxInFlight).toBeLessThanOrEqual(LIMIT);
     });
 
-    it('executes tasks concurrently (total time < sum of individual times)', async () => {
-        const DELAY = 30;
+    it('executes tasks concurrently (all tasks start before the shared gate is released)', async () => {
         const TASK_COUNT = 5;
-        const tasks = Array.from({ length: TASK_COUNT }, () => async () => {
-            await new Promise((r) => setTimeout(r, DELAY));
+        let started = 0;
+        let resolveAllStarted;
+        let releaseGate;
+        const allStarted = new Promise((resolve) => {
+            resolveAllStarted = resolve;
+        });
+        const gate = new Promise((resolve) => {
+            releaseGate = resolve;
         });
 
-        const start = Date.now();
-        await runWithConcurrency(tasks, TASK_COUNT);   // all 5 at once
-        const elapsed = Date.now() - start;
+        const tasks = Array.from({ length: TASK_COUNT }, () => async () => {
+            started += 1;
+            if (started === TASK_COUNT) {
+                resolveAllStarted();
+            }
+            await gate;
+        });
 
-        // Sequential time would be DELAY * TASK_COUNT = 150ms.
-        // With full concurrency it should be ~DELAY ms (+ some overhead).
-        // We use 2× DELAY as a generous upper bound.
-        expect(elapsed).toBeLessThan(DELAY * 2);
+        const runPromise = runWithConcurrency(tasks, TASK_COUNT);   // all 5 at once
+        const didStartAllTasks = await Promise.race([
+            allStarted.then(() => true),
+            new Promise((resolve) => setTimeout(() => resolve(false), 100)),
+        ]);
+
+        releaseGate();
+        await runPromise;
+
+        expect(didStartAllTasks).toBe(true);
     });
 });
 

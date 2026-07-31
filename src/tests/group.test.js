@@ -49,6 +49,7 @@ const {
     freshUser,
     freshGroup,
 } = require('./testHelpers');
+const { expectMoneyValue } = require('./financialAssertions');
 
 // ─── Suite Lifecycle ──────────────────────────────────────────────────────────
 
@@ -123,7 +124,7 @@ describe('listGroups', () => {
     it('returns groups sorted by percentage descending', async () => {
         await groupService.createGroup({ name: 'Bronze', percentage: 5 });
         await groupService.createGroup({ name: 'Gold', percentage: 20 });
-        await groupService.createGroup({ name: 'Silver', percentage: 10 });
+        await groupService.createGroup({ name: 'Silver', percentage: 10, isDefault: true });
 
         const groups = await groupService.listGroups();
 
@@ -219,11 +220,11 @@ describe('updateGroupPercentage', () => {
 // 13–15. AUTO-ASSIGN HIGHEST-PERCENTAGE GROUP ON REGISTRATION
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('Auto-assign highest percentage group on registration', () => {
-    it('assigns the group with the highest percentage to a new user', async () => {
+describe('Explicit default group on registration', () => {
+    it('assigns the explicit default group to a new user', async () => {
         // Create two groups — registration must pick Gold (20 %)
-        await groupService.createGroup({ name: 'Silver', percentage: 10 });
-        const gold = await groupService.createGroup({ name: 'Gold', percentage: 20 });
+        await groupService.createGroup({ name: 'Silver', percentage: 10, isDefault: true });
+        await groupService.createGroup({ name: 'Gold', percentage: 20 });
 
         const { user } = await register({
             name: 'New User',
@@ -233,27 +234,26 @@ describe('Auto-assign highest percentage group on registration', () => {
 
         // Fetch with groupId populated
         const dbUser = await User.findById(user._id).populate('groupId');
-        expect(dbUser.groupId._id.toString()).toBe(gold._id.toString());
-        expect(dbUser.groupId.percentage).toBe(20);
+        expect(dbUser.groupId.name).toBe('Silver');
+        expect(dbUser.groupId.percentage).toBe(10);
     });
 
-    it('assigns the single existing group when only one exists', async () => {
-        const only = await groupService.createGroup({ name: 'Only', percentage: 5 });
+    it('does not assign the single existing group unless it is default', async () => {
+        await groupService.createGroup({ name: 'Only', percentage: 5 });
 
-        const { user } = await register({
-            name: 'Lone User',
-            email: uniqueEmail(),
-            password: 'ValidPass@1',
-        });
-
-        const dbUser = await User.findById(user._id);
-        expect(dbUser.groupId.toString()).toBe(only._id.toString());
+        await expect(
+            register({
+                name: 'Lone User',
+                email: uniqueEmail(),
+                password: 'ValidPass@1',
+            })
+        ).rejects.toMatchObject({ code: 'DEFAULT_GROUP_NOT_CONFIGURED' });
     });
 
-    it('selects the highest among three groups correctly', async () => {
-        const g5 = await groupService.createGroup({ name: 'Tier5', percentage: 5 });
-        const g30 = await groupService.createGroup({ name: 'Tier30', percentage: 30 });
-        const g15 = await groupService.createGroup({ name: 'Tier15', percentage: 15 });
+    it('selects the explicit default among three groups', async () => {
+        const g5 = await groupService.createGroup({ name: 'Tier5', percentage: 5, isDefault: true });
+        await groupService.createGroup({ name: 'Tier30', percentage: 30 });
+        await groupService.createGroup({ name: 'Tier15', percentage: 15 });
 
         const { user } = await register({
             name: 'Picker',
@@ -262,15 +262,15 @@ describe('Auto-assign highest percentage group on registration', () => {
         });
 
         const dbUser = await User.findById(user._id);
-        expect(dbUser.groupId.toString()).toBe(g30._id.toString());
+        expect(dbUser.groupId.toString()).toBe(g5._id.toString());
     });
 
-    it('throws NO_GROUPS_AVAILABLE when no active groups exist', async () => {
+    it('throws DEFAULT_GROUP_NOT_CONFIGURED when no default group exists', async () => {
         // No groups seeded — clearCollections ran in beforeEach
         await expect(
             register({ name: 'Ghost', email: uniqueEmail(), password: 'ValidPass@1' })
         ).rejects.toMatchObject({
-            code: 'NO_GROUPS_AVAILABLE',
+            code: 'DEFAULT_GROUP_NOT_CONFIGURED',
             statusCode: 422,
         });
 
@@ -285,7 +285,7 @@ describe('Auto-assign highest percentage group on registration', () => {
 
         await expect(
             register({ name: 'Ghost', email: uniqueEmail(), password: 'ValidPass@1' })
-        ).rejects.toMatchObject({ code: 'NO_GROUPS_AVAILABLE' });
+        ).rejects.toMatchObject({ code: 'DEFAULT_GROUP_NOT_CONFIGURED' });
     });
 });
 
@@ -420,10 +420,10 @@ describe('Edge cases', () => {
 
         // All order snapshot fields must be unchanged
         const freshOrder = await Order.findById(order._id);
-        expect(freshOrder.unitPrice).toBe(110);              // unchanged
-        expect(freshOrder.basePriceSnapshot).toBe(100);      // unchanged
+        expectMoneyValue(freshOrder.unitPrice, 110);
+        expectMoneyValue(freshOrder.basePriceSnapshot, 100);
         expect(freshOrder.markupPercentageSnapshot).toBe(10); // unchanged — still 10, not 50
-        expect(freshOrder.finalPriceCharged).toBe(110);      // unchanged
+        expectMoneyValue(freshOrder.finalPriceCharged, 110);
 
         // Group has the new percentage (only affects future orders)
         const freshGrp = await freshGroup(group._id);

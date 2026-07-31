@@ -42,8 +42,7 @@ const orderSchema = new mongoose.Schema(
             type: String,
             uppercase: true,
             trim: true,
-            unique: true,
-            index: true,
+            default: null,
         },
 
         productId: {
@@ -116,6 +115,11 @@ const orderSchema = new mongoose.Schema(
             default: '0',
             get: (v) => String(v ?? '0'),
             set: (v) => String(v ?? '0'),
+        },
+
+        pricingSnapshot: {
+            type: mongoose.Schema.Types.Mixed,
+            default: null,
         },
 
         // ── Financial Split Tracking ─────────────────────────────────────────
@@ -378,6 +382,17 @@ const orderSchema = new mongoose.Schema(
 orderSchema.index({ userId: 1, createdAt: -1 });
 orderSchema.index({ status: 1 });
 orderSchema.index({ groupIdSnapshot: 1 });
+
+orderSchema.index(
+    { orderNumber: 1 },
+    {
+        unique: true,
+        name: 'unique_order_number_non_empty',
+        partialFilterExpression: {
+            orderNumber: { $type: 'string', $gt: '' },
+        },
+    }
+);
 
 /** Idempotency enforcement — sparse because not all orders carry a key. */
 orderSchema.index(

@@ -215,6 +215,7 @@ const createGroupSchema = Joi.object({
     percentage: Joi.number().min(0).max(1000).required(),
     billingMode: Joi.string().valid('standard', 'quantity_only').optional(),
     isActive: Joi.boolean().default(true),
+    isDefault: Joi.boolean().default(false),
 });
 
 const updateGroupSchema = Joi.object({
@@ -222,6 +223,7 @@ const updateGroupSchema = Joi.object({
     percentage: Joi.number().min(0).max(1000),
     billingMode: Joi.string().valid('standard', 'quantity_only').optional(),
     isActive: Joi.boolean(),
+    isDefault: Joi.boolean(),
     applyDebtAdjustment: Joi.boolean().default(false),
 }).min(1);
 
@@ -269,6 +271,8 @@ const reviewDepositSchema = Joi.object({
         'any.required': 'status is required',
         'any.only': 'status must be APPROVED or REJECTED',
     }),
+    amount: Joi.number().positive().max(1_000_000).optional(),
+    currency: Joi.string().trim().uppercase().pattern(/^[A-Z]{3}$/).optional(),
     adminNotes: Joi.string().trim().max(500).optional().allow('', null).messages({
         'string.max': 'adminNotes cannot exceed 500 characters',
     }),
@@ -292,6 +296,30 @@ const approveDepositSchema = Joi.object({
     amount: Joi.number().positive().max(1_000_000).optional(),
     currency: Joi.string().trim().uppercase().pattern(/^[A-Z]{3}$/).optional(),
     adminNotes: Joi.string().trim().max(500).optional().allow('', null),
+});
+
+const listReferralPayoutsQuery = Joi.object({
+    ...pagination,
+    status: Joi.string().trim().uppercase().valid('PENDING', 'PAID', 'REJECTED'),
+    method: Joi.string().trim().uppercase().valid('WALLET', 'MANUAL'),
+    search: Joi.string().trim().max(128).allow('', null),
+    dateFrom: Joi.date().iso(),
+    dateTo: Joi.date().iso().min(Joi.ref('dateFrom')),
+});
+
+const rejectReferralPayoutSchema = Joi.object({
+    rejectionReason: Joi.string().trim().min(3).max(500).required().messages({
+        'any.required': 'rejectionReason is required',
+        'string.min': 'rejectionReason must be at least 3 characters',
+    }),
+});
+
+const settleReferralPayoutSchema = Joi.object({
+    externalReference: Joi.string().trim().pattern(/^[A-Za-z0-9._:\-\/ ]{3,120}$/).optional().messages({
+        'string.pattern.base': 'externalReference contains unsupported characters',
+    }),
+    settlementNote: Joi.string().trim().max(500).optional().allow('', null),
+    manualSettlementNote: Joi.string().trim().max(500).optional().allow('', null),
 });
 
 // ─── Debt Adjustment schema ──────────────────────────────────────────────────
@@ -344,6 +372,10 @@ module.exports = {
         updateSetting: updateSettingSchema,
         // Deposits approval
         approveDeposit: approveDepositSchema,
+        // Referral payouts
+        listReferralPayouts: listReferralPayoutsQuery,
+        rejectReferralPayout: rejectReferralPayoutSchema,
+        settleReferralPayout: settleReferralPayoutSchema,
         // Debt Adjustment
         debtAdjustment: debtAdjustmentSchema,
     },

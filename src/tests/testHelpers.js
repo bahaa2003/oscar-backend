@@ -13,6 +13,9 @@ const Group = require('../modules/groups/group.model');
 const { Product } = require('../modules/products/product.model');
 const { Order } = require('../modules/orders/order.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
+require('../modules/referrals/referralCommission.model');
+require('../modules/referrals/referralPayoutRequest.model');
+require('../modules/resellerApplications/resellerApplication.model');
 // Provider module — imported so models are registered before clearCollections()
 require('../modules/providers/provider.model');
 require('../modules/providers/providerProduct.model');

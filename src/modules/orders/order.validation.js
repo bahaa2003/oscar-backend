@@ -2,6 +2,29 @@
 
 const { body, param } = require('express-validator');
 
+const forbiddenPricingFields = [
+    'unitPrice',
+    'unitPriceBase',
+    'basePrice',
+    'finalUnitPrice',
+    'lineTotal',
+    'subtotal',
+    'total',
+    'totalPrice',
+    'priceCoins',
+    'chargedAmount',
+    'groupId',
+    'percentage',
+    'markupPercentage',
+    'resellerStatus',
+    'exchangeRate',
+    'rateSnapshot',
+    'exchangeRateAtExecution',
+    'userId',
+    'financialSnapshot',
+    'pricingSnapshot',
+];
+
 const createOrderValidation = [
     body('productId')
         .notEmpty().withMessage('Product ID is required')
@@ -26,6 +49,15 @@ const createOrderValidation = [
             if (typeof value === 'object') return true;
             throw new Error('customInputs must be an object or an array');
         }),
+
+    body().custom((value) => {
+        for (const field of forbiddenPricingFields) {
+            if (Object.prototype.hasOwnProperty.call(value || {}, field)) {
+                throw new Error('Client-supplied pricing fields are not accepted');
+            }
+        }
+        return true;
+    }),
 ];
 
 const orderIdParamValidation = [

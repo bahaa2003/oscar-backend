@@ -12,7 +12,7 @@
  *  [1] pollPendingOrders — core mechanics
  *      Basic poll finds PROCESSING orders
  *      Updates completed orders to COMPLETED
- *      Updates cancelled/failed orders to FAILED + refunds wallet
+ *      Updates cancelled orders to CANCELED + refunds wallet
  *      Leaves still-pending orders as PROCESSING
  *      Returns zero stats when no orders exist
  *      Skips orders without providerOrderId
@@ -223,7 +223,7 @@ describe('[1] pollPendingOrders — core mechanics', () => {
         expect(updated.lastCheckedAt).not.toBeNull();
     });
 
-    it('transitions a Cancelled order to ORDER_STATUS.FAILED and refunds wallet', async () => {
+    it('transitions a Cancelled order to ORDER_STATUS.CANCELED and refunds wallet', async () => {
         const order = await makeProcessingOrder({
             userId: customer._id,
             productId: productChain.product._id,
@@ -243,7 +243,7 @@ describe('[1] pollPendingOrders — core mechanics', () => {
         expect(stats.failed).toBe(1);
 
         const updated = await Order.findById(order._id);
-        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.status).toBe(ORDER_STATUS.CANCELED);
         expect(updated.failedAt).not.toBeNull();
         expect(updated.refunded).toBe(true);  // refund applied
 

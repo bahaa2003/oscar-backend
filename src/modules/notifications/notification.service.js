@@ -313,6 +313,79 @@ const notifyOrderFailed = (order) => {
     });
 };
 
+const notifyReferralPayoutRequested = (payout) => notifyUser({
+    userId: payout.referrerId?._id ?? payout.referrerId,
+    title: 'Payout request submitted.',
+    message: 'Your referral payout request has been submitted for review.',
+    type: NOTIFICATION_TYPE.INFO,
+    source: 'REFERRAL_PAYOUT',
+});
+
+const notifyReferralPayoutRejected = (payout) => notifyUser({
+    userId: payout.referrerId?._id ?? payout.referrerId,
+    title: 'Payout request rejected.',
+    message: 'Your referral payout request was rejected. The commissions are available again.',
+    type: NOTIFICATION_TYPE.WARNING,
+    source: 'REFERRAL_PAYOUT',
+});
+
+const notifyReferralPayoutPaid = (payout) => notifyUser({
+    userId: payout.referrerId?._id ?? payout.referrerId,
+    title: 'Payout completed.',
+    message: 'Your referral payout has been completed.',
+    type: NOTIFICATION_TYPE.SUCCESS,
+    source: 'REFERRAL_PAYOUT',
+});
+
+const notifyResellerApplicationSubmitted = (application) => {
+    const customer = application.userId?.name || application.businessName || 'A customer';
+    return notifyAdminsAndSupervisors({
+        title: 'New Reseller Application',
+        message: `${customer} submitted reseller application ${application.applicationNumber}.`,
+        type: NOTIFICATION_TYPE.WARNING,
+        link: '/admin/referrals',
+        source: 'RESELLER',
+    });
+};
+
+const notifyResellerApplicationApproved = (application) => notifyUser({
+    userId: application.userId?._id ?? application.userId,
+    title: 'Reseller application approved.',
+    message: 'Your reseller/sub-agent application has been approved.',
+    type: NOTIFICATION_TYPE.SUCCESS,
+    source: 'RESELLER',
+});
+
+const notifyResellerApplicationRejected = (application) => {
+    const reason = application.rejectionReason ? ` Reason: ${application.rejectionReason}` : '';
+    return notifyUser({
+        userId: application.userId?._id ?? application.userId,
+        title: 'Reseller application rejected.',
+        message: `Your reseller/sub-agent application was rejected.${reason}`,
+        type: NOTIFICATION_TYPE.WARNING,
+        source: 'RESELLER',
+    });
+};
+
+const notifyResellerSuspended = (application) => {
+    const reason = application.suspensionReason ? ` Reason: ${application.suspensionReason}` : '';
+    return notifyUser({
+        userId: application.userId?._id ?? application.userId,
+        title: 'Reseller account suspended.',
+        message: `Your reseller/sub-agent commercial access was suspended.${reason}`,
+        type: NOTIFICATION_TYPE.WARNING,
+        source: 'RESELLER',
+    });
+};
+
+const notifyResellerReactivated = (application) => notifyUser({
+    userId: application.userId?._id ?? application.userId,
+    title: 'Reseller account reactivated.',
+    message: 'Your reseller/sub-agent commercial access has been reactivated.',
+    type: NOTIFICATION_TYPE.SUCCESS,
+    source: 'RESELLER',
+});
+
 /**
  * Notify admins/supervisors that a manual product order requires fulfillment.
  * @param {Object} order - Order document
@@ -562,6 +635,14 @@ module.exports = {
     notifyNewManualOrder,
     notifyOrderCompleted,
     notifyOrderFailed,
+    notifyReferralPayoutRequested,
+    notifyReferralPayoutRejected,
+    notifyReferralPayoutPaid,
+    notifyResellerApplicationSubmitted,
+    notifyResellerApplicationApproved,
+    notifyResellerApplicationRejected,
+    notifyResellerSuspended,
+    notifyResellerReactivated,
 
     // CRUD — customer
     getMyNotifications,

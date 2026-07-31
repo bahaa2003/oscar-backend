@@ -3,6 +3,10 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const config = require('../../config/config');
+const {
+    generateReferralCodeCandidate,
+    normalizeReferralCode,
+} = require('../referrals/referralCode.generator');
 
 /**
  * User roles enum — single source of truth.
@@ -30,6 +34,19 @@ const USER_STATUS = Object.freeze({
     PENDING: 'PENDING',
     ACTIVE: 'ACTIVE',
     REJECTED: 'REJECTED',
+});
+
+const RESELLER_STATUS = Object.freeze({
+    NONE: 'NONE',
+    PENDING: 'PENDING',
+    APPROVED: 'APPROVED',
+    REJECTED: 'REJECTED',
+    SUSPENDED: 'SUSPENDED',
+});
+
+const REFERRAL_SOURCE = Object.freeze({
+    EMAIL_REGISTRATION: 'EMAIL_REGISTRATION',
+    GOOGLE_OAUTH: 'GOOGLE_OAUTH',
 });
 
 const userSchema = new mongoose.Schema(
@@ -156,6 +173,99 @@ const userSchema = new mongoose.Schema(
             ref: 'Group',
             required: [true, 'A user must belong to a pricing group'],
             default: null,
+        },
+
+        referralCode: {
+            type: String,
+            required: [true, 'Referral code is required'],
+            trim: true,
+            uppercase: true,
+            minlength: [8, 'Referral code must be at least 8 characters'],
+            maxlength: [12, 'Referral code cannot exceed 12 characters'],
+            match: [/^[A-Z2-9]+$/, 'Referral code must be uppercase and URL-safe'],
+            default: () => generateReferralCodeCandidate(),
+            set: normalizeReferralCode,
+        },
+
+        referredBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+            select: false,
+        },
+
+        referredAt: {
+            type: Date,
+            default: null,
+            select: false,
+        },
+
+        referralSource: {
+            type: String,
+            enum: Object.values(REFERRAL_SOURCE),
+            default: null,
+            select: false,
+        },
+
+        resellerStatus: {
+            type: String,
+            enum: Object.values(RESELLER_STATUS),
+            default: RESELLER_STATUS.NONE,
+            index: true,
+        },
+
+        resellerApprovedAt: {
+            type: Date,
+            default: null,
+        },
+
+        resellerApprovedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+            select: false,
+        },
+
+        resellerRejectedAt: {
+            type: Date,
+            default: null,
+        },
+
+        resellerRejectionReason: {
+            type: String,
+            trim: true,
+            maxlength: 500,
+            default: null,
+        },
+
+        resellerSuspendedAt: {
+            type: Date,
+            default: null,
+        },
+
+        resellerSuspensionReason: {
+            type: String,
+            trim: true,
+            maxlength: 500,
+            default: null,
+        },
+
+        resellerReactivatedAt: {
+            type: Date,
+            default: null,
+        },
+
+        resellerGroupId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Group',
+            default: null,
+            index: true,
+        },
+
+        referrerCommissionStoppedAt: {
+            type: Date,
+            default: null,
+            select: false,
         },
 
         // ── Dynamic RBAC Permissions ─────────────────────────────────────────
@@ -288,7 +398,22 @@ const userSchema = new mongoose.Schema(
     },
     {
         timestamps: true,
-        toJSON: { virtuals: true },
+        toJSON: {
+            virtuals: true,
+            transform: (_doc, ret) => {
+                delete ret.password;
+                delete ret.emailVerificationToken;
+                delete ret.emailVerificationExpires;
+                delete ret.twoFactorOtp;
+                delete ret.twoFactorOtpExpires;
+                delete ret.referredBy;
+                delete ret.referredAt;
+                delete ret.referralSource;
+                delete ret.resellerApprovedBy;
+                delete ret.referrerCommissionStoppedAt;
+                return ret;
+            },
+        },
         toObject: { virtuals: true },
     }
 );
@@ -298,6 +423,15 @@ const userSchema = new mongoose.Schema(
 userSchema.index({ role: 1 });
 userSchema.index({ groupId: 1 });
 userSchema.index({ deletedAt: 1 }, { sparse: true });  // fast filter for non-deleted users
+userSchema.index({ referredBy: 1, referredAt: -1 });
+userSchema.index(
+    { referralCode: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { referralCode: { $type: 'string', $gt: '' } },
+        name: 'unique_referral_code',
+    }
+);
 // status index defined inline above
 
 // ─── Virtuals ────────────────────────────────────────────────────────────────
@@ -340,6 +474,42 @@ userSchema.pre('save', async function (next) {
     next();
 });
 
+userSchema.pre('save', async function (next) {
+    if (this.isNew) return next();
+
+    const protectedOnceSetFields = ['referredBy', 'referredAt', 'referralSource'];
+    const protectedAlwaysFields = ['referralCode'];
+    const modifiedProtected = [...protectedAlwaysFields, ...protectedOnceSetFields]
+        .filter((field) => this.isModified(field));
+
+    if (modifiedProtected.length === 0) return next();
+
+    try {
+        const previous = await this.constructor
+            .findById(this._id)
+            .select('+referredBy +referredAt +referralSource referralCode')
+            .lean();
+
+        if (!previous) return next();
+
+        if (this.isModified('referralCode') && previous.referralCode !== this.referralCode) {
+            return next(new Error('referralCode cannot be changed once assigned.'));
+        }
+
+        for (const field of protectedOnceSetFields) {
+            if (!this.isModified(field)) continue;
+            const oldValue = previous[field];
+            if (oldValue != null && String(oldValue) !== String(this[field])) {
+                return next(new Error(`${field} cannot be changed once assigned.`));
+            }
+        }
+
+        return next();
+    } catch (err) {
+        return next(err);
+    }
+});
+
 // ─── Instance Methods ─────────────────────────────────────────────────────────
 userSchema.methods.comparePassword = async function (candidatePassword) {
     return bcrypt.compare(candidatePassword, this.password);
@@ -351,12 +521,19 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 userSchema.methods.toSafeObject = function () {
     const obj = this.toObject();
     delete obj.password;
+    delete obj.emailVerificationToken;
+    delete obj.emailVerificationExpires;
     delete obj.twoFactorOtp;
     delete obj.twoFactorOtpExpires;
+    delete obj.referredBy;
+    delete obj.referredAt;
+    delete obj.referralSource;
+    delete obj.resellerApprovedBy;
+    delete obj.referrerCommissionStoppedAt;
     return obj;
 };
 
 const User = mongoose.model('User', userSchema);
 
-module.exports = { User, ROLES, USER_STATUS };
+module.exports = { User, ROLES, USER_STATUS, RESELLER_STATUS, REFERRAL_SOURCE };
 module.exports.User = User; // CommonJS default export convenience

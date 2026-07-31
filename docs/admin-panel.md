@@ -196,7 +196,7 @@ POST /api/admin/wallets/:userId/add
 { "amount": 100, "reason": "Promotional credit" }
 ```
 
-Calls `creditWalletDirect()` inside a session. Writes `CREDIT` WalletTransaction.
+Calls `creditWalletDirect()` and writes a `CREDIT` WalletTransaction. If a session is supplied by a future transaction boundary, the wallet helper propagates it.
 
 ### Deduct Funds
 
@@ -205,7 +205,7 @@ POST /api/admin/wallets/:userId/deduct
 { "amount": 50, "reason": "Correction adjustment" }
 ```
 
-Calls `debitWalletAtomic()` inside a session. Fails if insufficient balance.
+Calls `debitWalletAtomic()`. Fails if insufficient balance and propagates an optional session when supplied.
 
 ---
 
@@ -341,7 +341,7 @@ GET /api/admin/provider-products/:providerId         ← one provider
 GET /api/admin/provider-products/item/:id            ← single item
 ```
 
-Returns raw ProviderProduct documents including `rawPayload`.
+Returns raw ProviderProduct documents including `rawPayload`. `rawPrice` is a canonical Decimal string; admins must treat it as financial data, not a JavaScript floating-point number.
 
 ### Set Translated Name
 
@@ -434,16 +434,53 @@ Sorted by submission time ascending (oldest pending first).
 GET /api/admin/deposits/:id
 ```
 
-Returns full deposit including `transferImageUrl` for receipt verification.
+Returns full deposit including `receiptImage` for receipt verification.
 
 ### Approve Deposit
 
 ```http
-PATCH /api/admin/deposits/:id/approve
-{ "overrideAmount": 95 }
+PATCH /api/admin/deposits/:id/review
+{ "status": "APPROVED", "amount": 95, "currency": "EGP" }
 ```
 
-`overrideAmount` is optional. If provided, this amount is credited rather than `amountRequested`. The deposit's `amountApproved` is set to the actual credited amount.
+`amount` and `currency` are optional correction fields. If provided, the service recalculates and snapshots `exchangeRate` and `amountUsd`; wallet credit uses the USD amount. Approval now executes inside one MongoDB transaction containing the PENDING deposit claim, final validation, approval snapshot update, wallet credit, `WalletTransaction` insert, referral commission evaluation, eligible `ReferralCommission` insert, and deposit evaluation snapshot update. Audit and notification side effects run after commit only.
+
+MongoDB must support transactions. There is no unsafe non-transaction fallback. Repeated healthy approvals are idempotent and use the stored `referralCommissionEvaluation` snapshot rather than the current referrer state or current rate. Inconsistent legacy deposits, missing CREATED commissions, or conflicting commission snapshots return `DEPOSIT_RECONCILIATION_REQUIRED`.
+
+Phase 2C creates commission records with status `AVAILABLE` only. Phase 2D exposes read-only user dashboard APIs. Phase 2E adds payout review under `/api/admin/referral-payouts` for admins/supervisors with the existing wallet-management permission. Admin rejection changes the payout to `REJECTED` and atomically unlocks linked commissions back to `AVAILABLE`. Admin settlement changes the payout to `PAID` and all linked commissions to `PAID`; `WALLET` settlement also credits the referrer's wallet once through one `WalletTransaction` with `sourceType = REFERRAL_PAYOUT`, while `MANUAL` settlement requires an external reference and does not credit the wallet.
+
+No external payment provider, payout cancellation endpoint, commission amount editing, production migration, or legacy auto-repair is implemented by Phase 2E.
+
+Phase 3A implements the reseller/sub-agent workflow as commercial account state, not as an authentication role. Review APIs are documented below.
+
+---
+
+## Reseller/Sub-Agent Application Review
+
+Phase 3A treats customer-facing "Sub-Agent" and backend `RESELLER` as one commercial workflow. It does not add `RESELLER` or `SUB_AGENT` to auth roles and does not change referral attribution, commission rates, referral payouts, wallet balances, or provider behavior.
+
+Admin review endpoints require `MANAGE_USERS`:
+
+```http
+GET  /api/admin/reseller-applications
+GET  /api/admin/reseller-applications/:id
+POST /api/admin/reseller-applications/:id/approve
+POST /api/admin/reseller-applications/:id/reject
+POST /api/admin/reseller-applications/:id/suspend
+POST /api/admin/reseller-applications/:id/reactivate
+```
+
+The state machine is `NONE -> PENDING`, `PENDING -> APPROVED|REJECTED`, `APPROVED -> SUSPENDED`, and `SUSPENDED -> APPROVED`. Approval validates an active target pricing Group and updates `ResellerApplication`, `User.resellerStatus`, `User.resellerGroupId`, and `User.groupId` in one MongoDB transaction. Rejection stores a safe reason and leaves the user's Group unchanged. Suspension moves the user to the explicit active Default Group. Reactivation restores the assigned reseller Group or an admin-selected replacement Group.
+
+Phase 3B adds a read-only admin pricing diagnostic:
+
+```text
+GET /api/admin/reseller-pricing/preview?userId=...&productId=...&quantity=1&currency=USD
+```
+
+The route requires `MANAGE_USERS`. It resolves the user's commercial reseller state, effective Group, product base price, Group markup, final unit price, line total, currency, exchange rate, and calculation version without mutating users, Groups, products, orders, wallets, referral commissions, or payouts. It does not expose provider secrets or private margin internals.
+
+Retry is explicitly bounded by `MAX_RESELLER_TRANSACTION_ATTEMPTS = 3`. Audit logs and notifications run only after commit. There is no production migration, automatic approval/rejection, KYC provider, OCR workflow, reseller wallet/credit-limit system, multi-level referral, or commission bonus in Phase 3A.
 
 **Errors:**
 - `422 DEPOSIT_ALREADY_APPROVED` — prevent double-approval
@@ -473,6 +510,8 @@ POST /api/admin/groups
 ```
 
 `percentage` is the markup applied on top of base price for all members. A value of `5` means a product priced `$10.00` costs this group `$10.50`.
+
+Phase 3B preserves this exact formula for reseller pricing. `Group.percentage` is not a referral commission rate, payout rate, discount, or authentication permission.
 
 ### Update Group
 
@@ -578,9 +617,10 @@ Returns all actions performed by a specific admin (actorId = admin User._id).
   "entityType": "DEPOSIT",
   "entityId": "64dep...",
   "metadata": {
-    "amountApproved": 95,
+    "amountUsd": 1.9,
     "userId": "64user...",
-    "overrideAmount": 95
+    "adminOverrideApplied": true,
+    "exchangeRate": 50
   },
   "ipAddress": "192.168.1.1",
   "userAgent": "Mozilla/5.0...",

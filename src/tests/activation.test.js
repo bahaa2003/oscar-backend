@@ -79,7 +79,7 @@ const uniqueEmail = () =>
 
 /** Register and return the created user. Requires a group to exist first. */
 const registerUser = async () => {
-    await createGroup({ name: 'Standard', percentage: 0 });
+    await createGroup({ name: 'Standard', percentage: 0, isDefault: true });
     return register({ name: 'Jane Doe', email: uniqueEmail(), password: 'ValidPass@1' });
 };
 
@@ -105,7 +105,7 @@ describe('Registration', () => {
     });
 
     it('newly registered user cannot log in immediately (unverified email)', async () => {
-        await createGroup({ name: 'StandardGr', percentage: 0 });
+        await createGroup({ name: 'StandardGr', percentage: 0, isDefault: true });
         const email = uniqueEmail();
         await register({ name: 'Jane', email, password: 'ValidPass@1' });
 
@@ -355,7 +355,7 @@ describe('Full lifecycle flows', () => {
     let admin;
 
     beforeEach(async () => {
-        await createGroup({ name: 'GrDefault', percentage: 0 });
+        await createGroup({ name: 'GrDefault', percentage: 0, isDefault: true });
         admin = await createAdmin();
     });
 

@@ -15,6 +15,7 @@ const mongoose = require('mongoose');
 const config = require('../config/config');
 const { User, ROLES, USER_STATUS } = require('../modules/users/user.model');
 const Group = require('../modules/groups/group.model');
+const { createUserWithReferralCode } = require('../modules/referrals/referralCode.service');
 const { Product } = require('../modules/products/product.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { Order } = require('../modules/orders/order.model');
@@ -41,8 +42,8 @@ const seed = async () => {
         }
 
         // 1. Create Groups
-        // Standard (0%) is the default / lowest tier.
-        // Premium (15%) is the highest and is auto-assigned to new registrations.
+        // Standard (0%) is the explicit default / lowest tier.
+        // Premium (15%) remains available but is not auto-assigned.
         const standardGroup = await Group.findOneAndUpdate(
             { name: 'Standard' },
             { name: 'Standard', percentage: 0, isActive: true },
@@ -55,17 +56,24 @@ const seed = async () => {
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
 
+        await Group.updateMany(
+            { _id: { $ne: standardGroup._id }, isDefault: true },
+            { $set: { isDefault: false } }
+        );
+        standardGroup.isDefault = true;
+        await standardGroup.save();
+
         console.log('Groups seeded:');
         console.log(`   Standard (0%) id: ${standardGroup._id}`);
         console.log(`   Premium (15%) id: ${premiumGroup._id}`);
-        console.log('   New registrations will be auto-assigned: Premium (highest percentage)');
+        console.log('   New registrations will be assigned to explicit default: Standard');
 
         // 2. Create Admin User
         // Admins are assigned the Standard group (lowest markup) by convention.
         const adminExists = await User.findOne({ email: 'admin@platform.com' });
         let admin;
         if (!adminExists) {
-            admin = await User.create({
+            admin = await createUserWithReferralCode({
                 name: 'Platform Admin',
                 email: 'admin@platform.com',
                 password: 'Admin@1234',
@@ -73,7 +81,7 @@ const seed = async () => {
                 groupId: standardGroup._id,
                 walletBalance: 0,
                 creditLimit: 0,
-            });
+            }, { User });
             console.log('Admin created: admin@platform.com / Admin@1234');
         } else {
             admin = adminExists;
@@ -85,7 +93,7 @@ const seed = async () => {
         const supervisorExists = await User.findOne({ email: 'supervisor@platform.com' });
         let supervisor;
         if (!supervisorExists) {
-            supervisor = await User.create({
+            supervisor = await createUserWithReferralCode({
                 name: 'Operations Supervisor',
                 email: 'supervisor@platform.com',
                 password: 'Supervisor@1234',
@@ -96,7 +104,7 @@ const seed = async () => {
                 groupId: standardGroup._id,
                 walletBalance: 0,
                 creditLimit: 0,
-            });
+            }, { User });
             console.log('Supervisor created: supervisor@platform.com / Supervisor@1234');
         } else {
             supervisor = supervisorExists;
@@ -114,7 +122,7 @@ const seed = async () => {
         const customerExists = await User.findOne({ email: 'customer@platform.com' });
         let customer;
         if (!customerExists) {
-            customer = await User.create({
+            customer = await createUserWithReferralCode({
                 name: 'Test Customer',
                 email: 'customer@platform.com',
                 password: 'Customer@1234',
@@ -122,7 +130,7 @@ const seed = async () => {
                 groupId: standardGroup._id,
                 walletBalance: 500,
                 creditLimit: 200,
-            });
+            }, { User });
             console.log('Customer created: customer@platform.com / Customer@1234');
             console.log('   walletBalance: $500 | creditLimit: $200 | group: Standard');
         } else {

@@ -39,6 +39,11 @@ const groupSchema = new mongoose.Schema(
             default: true,
         },
 
+        isDefault: {
+            type: Boolean,
+            default: false,
+        },
+
         /**
          * Billing mode for this group.
          *
@@ -65,6 +70,14 @@ const groupSchema = new mongoose.Schema(
 
 // unique:true on name already creates that index — no explicit .index() needed
 groupSchema.index({ percentage: -1 }); // supports "highest percentage" queries
+groupSchema.index(
+    { isDefault: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { isDefault: true, deletedAt: null },
+        name: 'unique_non_deleted_default_group',
+    }
+);
 
 const Group = mongoose.model('Group', groupSchema);
 

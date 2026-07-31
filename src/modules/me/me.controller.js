@@ -15,6 +15,12 @@ const productService = require('../products/product.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { NotFoundError } = require('../../shared/errors/AppError');
+const {
+    resolveEffectivePricingContext,
+    calculateProductPrice,
+} = require('../pricing/commercialPricing.service');
+const { getConversionRate } = require('../../services/currencyConverter.service');
+const { usdToLocal } = require('../../shared/utils/currencyMath');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -209,10 +215,6 @@ const getProducts = catchAsync(async (req, res) => {
     const page = parsePage(req.query.page);
     const limit = parseLimit(req.query.limit);
     const { Product } = require('../products/product.model');
-    const Group = require('../groups/group.model');
-    const { getConversionRate } = require('../../services/currencyConverter.service');
-    const { usdToLocal } = require('../../shared/utils/currencyMath');
-    const { calculateFinalPrice } = require('../orders/pricing.service');
 
     const filter = { isActive: true, deletedAt: null };
     if (req.query.search) {
@@ -234,11 +236,7 @@ const getProducts = catchAsync(async (req, res) => {
     ]);
 
     // ── 1. Resolve user's group markup ────────────────────────────────────────
-    let markupPercentage = 0;
-    if (req.user.groupId) {
-        const group = await Group.findById(req.user.groupId).select('percentage isActive').lean();
-        if (group?.isActive) markupPercentage = group.percentage ?? 0;
-    }
+    const pricingContext = await resolveEffectivePricingContext(req.user._id);
 
     // ── 2. Resolve user's currency rate ───────────────────────────────────────
     const userCurrency = req.user.currency || 'USD';
@@ -246,12 +244,26 @@ const getProducts = catchAsync(async (req, res) => {
 
     // ── 3. Apply pipeline: Base → Markup → Currency ───────────────────────────
     const converted = products.map((p) => {
-        const markedUpUSD = calculateFinalPrice(p.basePrice, markupPercentage);
+        const pricing = calculateProductPrice({
+            product: p,
+            pricingContext,
+            quantity: 1,
+            currency: 'USD',
+            exchangeRate: 1,
+        });
         return {
             ...p,
-            markedUpPriceUSD: markedUpUSD,
-            displayPrice: usdToLocal(markedUpUSD, rate),
+            finalPrice: pricing.finalUnitPrice,
+            markedUpPriceUSD: pricing.finalUnitPrice,
+            displayPrice: usdToLocal(pricing.finalUnitPrice, rate),
             displayCurrency: userCurrency,
+            pricing: {
+                finalUnitPrice: pricing.finalUnitPrice,
+                displayCurrency: userCurrency,
+                pricingType: pricingContext.pricingType,
+                effectiveGroupName: pricingContext.effectiveGroup.name,
+                calculationVersion: pricing.calculationVersion,
+            },
         };
     });
 
@@ -263,10 +275,6 @@ const getProducts = catchAsync(async (req, res) => {
  */
 const getProduct = catchAsync(async (req, res) => {
     const { Product } = require('../products/product.model');
-    const Group = require('../groups/group.model');
-    const { getConversionRate } = require('../../services/currencyConverter.service');
-    const { usdToLocal } = require('../../shared/utils/currencyMath');
-    const { calculateFinalPrice } = require('../orders/pricing.service');
 
     const product = await Product.findOne({ _id: req.params.id, isActive: true, deletedAt: null })
         .select('-providerProduct')
@@ -275,24 +283,34 @@ const getProduct = catchAsync(async (req, res) => {
     if (!product) throw new NotFoundError('Product');
 
     // ── 1. Group markup ───────────────────────────────────────────────────────
-    let markupPercentage = 0;
-    if (req.user.groupId) {
-        const group = await Group.findById(req.user.groupId).select('percentage isActive').lean();
-        if (group?.isActive) markupPercentage = group.percentage ?? 0;
-    }
+    const pricingContext = await resolveEffectivePricingContext(req.user._id);
 
     // ── 2. Currency rate ──────────────────────────────────────────────────────
     const userCurrency = req.user.currency || 'USD';
     const rate = await getConversionRate(userCurrency);
 
     // ── 3. Pipeline: Base → Markup → Currency ─────────────────────────────────
-    const markedUpUSD = calculateFinalPrice(product.basePrice, markupPercentage);
+    const pricing = calculateProductPrice({
+        product,
+        pricingContext,
+        quantity: 1,
+        currency: 'USD',
+        exchangeRate: 1,
+    });
 
     sendSuccess(res, {
         ...product,
-        markedUpPriceUSD: markedUpUSD,
-        displayPrice: usdToLocal(markedUpUSD, rate),
+        finalPrice: pricing.finalUnitPrice,
+        markedUpPriceUSD: pricing.finalUnitPrice,
+        displayPrice: usdToLocal(pricing.finalUnitPrice, rate),
         displayCurrency: userCurrency,
+        pricing: {
+            finalUnitPrice: pricing.finalUnitPrice,
+            displayCurrency: userCurrency,
+            pricingType: pricingContext.pricingType,
+            effectiveGroupName: pricingContext.effectiveGroup.name,
+            calculationVersion: pricing.calculationVersion,
+        },
     });
 });
 

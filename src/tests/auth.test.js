@@ -50,7 +50,7 @@ beforeEach(async () => {
 
 /** Create a group + register a new user, return { user, rawToken }. */
 const registerUser = async () => {
-    await createGroup({ name: 'Default', percentage: 0 });
+    await createGroup({ name: 'Default', percentage: 0, isDefault: true });
     const result = await register({
         name: 'Test User',
         email: `test-${Date.now()}@example.com`,
@@ -78,7 +78,7 @@ const registerUser = async () => {
 
 describe('[1] Registration', () => {
     beforeEach(async () => {
-        await createGroup({ name: 'Default', percentage: 0 });
+        await createGroup({ name: 'Default', percentage: 0, isDefault: true });
     });
 
     it('creates a new user with verified=false and ACTIVE status', async () => {
@@ -252,7 +252,7 @@ describe('[4] Login gates', () => {
     const password = 'SecurePass@1';
 
     beforeEach(async () => {
-        await createGroup({ name: 'Default', percentage: 0 });
+        await createGroup({ name: 'Default', percentage: 0, isDefault: true });
     });
 
     it('blocks login when email is not verified (even though ACTIVE)', async () => {

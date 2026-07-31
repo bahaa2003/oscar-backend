@@ -33,24 +33,28 @@ const CACHE_TTL_MS = 60_000;
  * Returns null for USD without hitting the DB (rate is always 1).
  *
  * @param {string}   code     - ISO 4217 code (any case)
- * @param {boolean}  bypassCache - set true in tests
+ * @param {boolean|Object}  options - boolean bypassCache or { bypassCache, session }
  * @returns {Promise<Object|null>}
  */
-const _getCurrency = async (code, bypassCache = false) => {
+const _getCurrency = async (code, options = false) => {
+    const bypassCache = typeof options === 'boolean' ? options : !!options?.bypassCache;
+    const session = typeof options === 'object' && options ? options.session : null;
     const upper = (code ?? '').toUpperCase().trim();
     if (!upper) throw new BusinessRuleError('Currency code is required.', 'MISSING_CURRENCY_CODE');
 
     // USD shortcut — rate is always 1
     if (upper === 'USD') return null;   // callers handle null → rate = 1
 
-    if (!bypassCache) {
+    if (!bypassCache && !session) {
         const cached = _cache.get(upper);
         if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) {
             return cached.doc;
         }
     }
 
-    const doc = await Currency.findOne({ code: upper });
+    const query = Currency.findOne({ code: upper });
+    if (session) query.session(session);
+    const doc = await query;
     if (!doc) throw new NotFoundError(`Currency '${upper}'`);
     if (!doc.isActive) {
         throw new BusinessRuleError(
@@ -59,7 +63,9 @@ const _getCurrency = async (code, bypassCache = false) => {
         );
     }
 
-    _cache.set(upper, { doc, cachedAt: Date.now() });
+    if (!session) {
+        _cache.set(upper, { doc, cachedAt: Date.now() });
+    }
     return doc;
 };
 
@@ -178,8 +184,8 @@ const convertUserCurrencyToUsd = async (amount, userCurrency) => {
  * @param {string} currencyCode
  * @returns {Promise<number>}
  */
-const getConversionRate = async (currencyCode) => {
-    const currDoc = await _getCurrency(currencyCode);
+const getConversionRate = async (currencyCode, options = false) => {
+    const currDoc = await _getCurrency(currencyCode, options);
     return currDoc ? currDoc.platformRate : 1;
 };
 

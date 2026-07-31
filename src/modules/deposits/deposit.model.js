@@ -17,6 +17,59 @@ const DEPOSIT_STATUS = Object.freeze({
     REJECTED: 'REJECTED',
 });
 
+const REFERRAL_COMMISSION_EVALUATION_OUTCOME = Object.freeze({
+    CREATED: 'CREATED',
+    NOT_ELIGIBLE: 'NOT_ELIGIBLE',
+    DISABLED: 'DISABLED',
+});
+
+const referralCommissionEvaluationSchema = new mongoose.Schema(
+    {
+        version: {
+            type: String,
+            enum: ['v1'],
+            default: 'v1',
+        },
+        outcome: {
+            type: String,
+            enum: Object.values(REFERRAL_COMMISSION_EVALUATION_OUTCOME),
+            required: true,
+        },
+        reason: {
+            type: String,
+            required: true,
+            trim: true,
+            maxlength: 80,
+        },
+        commissionId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'ReferralCommission',
+            default: null,
+        },
+        referrerId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+        },
+        ratePercent: {
+            type: String,
+            default: null,
+        },
+        amountUsd: {
+            type: String,
+            default: null,
+        },
+        evaluatedAt: {
+            type: Date,
+            required: true,
+        },
+    },
+    {
+        _id: false,
+        id: false,
+    }
+);
+
 const depositRequestSchema = new mongoose.Schema(
     {
         /** Customer who created this request. */
@@ -161,6 +214,12 @@ const depositRequestSchema = new mongoose.Schema(
             type: Date,
             default: null,
         },
+
+        referralCommissionEvaluation: {
+            type: referralCommissionEvaluationSchema,
+            default: null,
+            select: false,
+        },
     },
     {
         timestamps: true,  // createdAt + updatedAt
@@ -198,4 +257,8 @@ depositRequestSchema.virtual('isPending').get(function () {
 
 const DepositRequest = mongoose.model('DepositRequest', depositRequestSchema);
 
-module.exports = { DepositRequest, DEPOSIT_STATUS };
+module.exports = {
+    DepositRequest,
+    DEPOSIT_STATUS,
+    REFERRAL_COMMISSION_EVALUATION_OUTCOME,
+};

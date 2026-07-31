@@ -14,10 +14,19 @@
  * a 2 dp Number because wallet balances are standard fiat.
  */
 
-const { User } = require('../users/user.model');
-const Group = require('../groups/group.model');
-const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
-const { toDecimal, toStr, isPositive, multiply, add } = require('../../shared/utils/decimalPrecision');
+const { BusinessRuleError } = require('../../shared/errors/AppError');
+const { Decimal, toDecimal, isPositive, multiply, divide, add } = require('../../shared/utils/decimalPrecision');
+const { resolveEffectivePricingContext } = require('../pricing/commercialPricing.service');
+
+const isValidDecimalInput = (value) => {
+    if (value === null || value === undefined || value === '') return false;
+    try {
+        const decimal = new Decimal(value);
+        return decimal.isFinite();
+    } catch {
+        return false;
+    }
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PURE CALCULATION
@@ -37,6 +46,13 @@ const { toDecimal, toStr, isPositive, multiply, add } = require('../../shared/ut
  * @throws {BusinessRuleError} if inputs are invalid
  */
 const calculateFinalPrice = (basePrice, percentage) => {
+    if (!isValidDecimalInput(basePrice)) {
+        throw new BusinessRuleError(
+            'basePrice must be a non-negative number.',
+            'INVALID_BASE_PRICE'
+        );
+    }
+
     const base = toDecimal(basePrice);
     if (base.isNegative()) {
         throw new BusinessRuleError(
@@ -44,6 +60,13 @@ const calculateFinalPrice = (basePrice, percentage) => {
             'INVALID_BASE_PRICE'
         );
     }
+    if (typeof percentage !== 'number') {
+        throw new BusinessRuleError(
+            'percentage must be a non-negative number.',
+            'INVALID_PERCENTAGE'
+        );
+    }
+
     const pct = Number(percentage);
     if (!Number.isFinite(pct) || pct < 0) {
         throw new BusinessRuleError(
@@ -53,7 +76,7 @@ const calculateFinalPrice = (basePrice, percentage) => {
     }
 
     // basePrice + basePrice * (percentage / 100)
-    const markup = multiply(basePrice, String(pct / 100));
+    const markup = multiply(basePrice, divide(String(pct), '100'));
     return add(basePrice, markup);
 };
 
@@ -76,32 +99,18 @@ const calculateFinalPrice = (basePrice, percentage) => {
  * }>}
  */
 const calculateUserPrice = async (userId, basePrice, session = null) => {
-    // Load user with groupId populated so we get percentage in one round-trip
-    const query = User.findById(userId).populate('groupId', 'name percentage isActive');
-    if (session) query.session(session);
-    const user = await query;
+    const pricingContext = await resolveEffectivePricingContext(userId, { session });
 
-    if (!user) throw new NotFoundError('User');
-
-    if (!user.groupId) {
+    if (pricingContext.pricingEligibility?.reason === 'DEFAULT_GROUP_FALLBACK') {
         throw new BusinessRuleError(
             'User is not assigned to any pricing group. Contact an administrator.',
             'NO_GROUP_ASSIGNED'
         );
     }
 
-    const group = user.groupId; // already populated
-
-    if (!group.isActive) {
-        throw new BusinessRuleError(
-            `User's pricing group '${group.name}' is inactive. Contact an administrator.`,
-            'GROUP_INACTIVE'
-        );
-    }
-
     // percentage stays as Number — it's a simple integer (e.g. 20 = 20%)
-    const markupPercentage = Number.isFinite(Number(group.percentage))
-        ? Number(group.percentage)
+    const markupPercentage = Number.isFinite(Number(pricingContext.effectiveGroup.percentage))
+        ? Number(pricingContext.effectiveGroup.percentage)
         : 0;
 
     // basePrice is a string — ensure it's valid
@@ -113,7 +122,8 @@ const calculateUserPrice = async (userId, basePrice, session = null) => {
         basePrice: safeBasePrice,
         markupPercentage,
         finalPrice,
-        groupId: group._id,
+        groupId: pricingContext.effectiveGroup.id,
+        pricingContext,
     };
 };
 

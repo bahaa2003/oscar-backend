@@ -44,8 +44,8 @@ const resolveSettings = (overrides = {}) => {
     };
 };
 
-const analyzeIntegrityAndBlankness = async (imageBuffer, settings) => {
-    if (!sharp) {
+const analyzeIntegrityAndBlankness = async (imageBuffer, settings, imageProcessor = sharp) => {
+    if (!imageProcessor) {
         return {
             isValid: false,
             reason: 'SHARP_NOT_AVAILABLE',
@@ -61,7 +61,7 @@ const analyzeIntegrityAndBlankness = async (imageBuffer, settings) => {
     }
 
     try {
-        const image = sharp(imageBuffer, {
+        const image = imageProcessor(imageBuffer, {
             failOn: 'error',
             limitInputPixels: settings.maxInputPixels,
         });
@@ -148,7 +148,7 @@ const analyzeIntegrityAndBlankness = async (imageBuffer, settings) => {
     }
 };
 
-const runOptionalOcrValidation = async (imageBuffer, settings) => {
+const runOptionalOcrValidation = async (imageBuffer, settings, imageProcessor = sharp) => {
     if (!settings.enableOcr) {
         return {
             skipped: true,
@@ -169,7 +169,7 @@ const runOptionalOcrValidation = async (imageBuffer, settings) => {
     }
 
     try {
-        const preparedBuffer = await sharp(imageBuffer)
+        const preparedBuffer = await imageProcessor(imageBuffer)
             .resize({ width: settings.ocrResizeWidth, withoutEnlargement: true })
             .grayscale()
             .normalize()
@@ -221,14 +221,18 @@ const runOptionalOcrValidation = async (imageBuffer, settings) => {
 };
 
 const analyzeReceiptBuffer = async (imageBuffer, overrides = {}) => {
-    const settings = resolveSettings(overrides);
+    const { imageProcessor, ...settingsOverrides } = overrides || {};
+    const settings = resolveSettings(settingsOverrides);
+    const resolvedImageProcessor = Object.prototype.hasOwnProperty.call(overrides || {}, 'imageProcessor')
+        ? imageProcessor
+        : sharp;
 
-    const integrityResult = await analyzeIntegrityAndBlankness(imageBuffer, settings);
+    const integrityResult = await analyzeIntegrityAndBlankness(imageBuffer, settings, resolvedImageProcessor);
     if (!integrityResult.isValid) {
         return integrityResult;
     }
 
-    const ocrResult = await runOptionalOcrValidation(imageBuffer, settings);
+    const ocrResult = await runOptionalOcrValidation(imageBuffer, settings, resolvedImageProcessor);
     if (!ocrResult.isValid) {
         return ocrResult;
     }

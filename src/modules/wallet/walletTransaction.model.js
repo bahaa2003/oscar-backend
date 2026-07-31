@@ -21,6 +21,21 @@ const TRANSACTION_STATUS = Object.freeze({
     FAILED: 'FAILED',
 });
 
+const TRANSACTION_SOURCE_TYPES = Object.freeze({
+    DEPOSIT: 'DEPOSIT',
+    ORDER: 'ORDER',
+    ADMIN_ADJUSTMENT: 'ADMIN_ADJUSTMENT',
+    REFUND: 'REFUND',
+    REFERRAL_PAYOUT: 'REFERRAL_PAYOUT',
+});
+
+const TRANSACTION_OPERATIONS = Object.freeze({
+    CREDIT: 'CREDIT',
+    DEBIT: 'DEBIT',
+    REFUND: 'REFUND',
+    DEBT_ADJUSTMENT: 'DEBT_ADJUSTMENT',
+});
+
 const walletTransactionSchema = new mongoose.Schema(
     {
         userId: {
@@ -59,6 +74,30 @@ const walletTransactionSchema = new mongoose.Schema(
             default: null,
         },
 
+        sourceType: {
+            type: String,
+            enum: Object.values(TRANSACTION_SOURCE_TYPES),
+            default: null,
+        },
+
+        sourceId: {
+            type: mongoose.Schema.Types.ObjectId,
+            default: null,
+        },
+
+        operation: {
+            type: String,
+            enum: Object.values(TRANSACTION_OPERATIONS),
+            default: null,
+        },
+
+        idempotencyKey: {
+            type: String,
+            trim: true,
+            maxlength: 128,
+            default: null,
+        },
+
         status: {
             type: String,
             enum: Object.values(TRANSACTION_STATUS),
@@ -79,7 +118,25 @@ const walletTransactionSchema = new mongoose.Schema(
 // Compound index for efficient user transaction history queries
 walletTransactionSchema.index({ userId: 1, createdAt: -1 });
 walletTransactionSchema.index({ reference: 1 });
+walletTransactionSchema.index(
+    { userId: 1, sourceType: 1, sourceId: 1, operation: 1 },
+    {
+        unique: true,
+        name: 'unique_wallet_source_operation',
+        partialFilterExpression: {
+            sourceType: { $type: 'string' },
+            sourceId: { $type: 'objectId' },
+            operation: { $type: 'string' },
+        },
+    }
+);
 
 const WalletTransaction = mongoose.model('WalletTransaction', walletTransactionSchema);
 
-module.exports = { WalletTransaction, TRANSACTION_TYPES, TRANSACTION_STATUS };
+module.exports = {
+    WalletTransaction,
+    TRANSACTION_TYPES,
+    TRANSACTION_STATUS,
+    TRANSACTION_SOURCE_TYPES,
+    TRANSACTION_OPERATIONS,
+};

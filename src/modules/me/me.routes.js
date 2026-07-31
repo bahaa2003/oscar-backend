@@ -38,6 +38,29 @@ const depositUpload = createUpload('deposits');
 
 const router = Router();
 
+const forbiddenPricingFields = [
+    'unitPrice',
+    'unitPriceBase',
+    'basePrice',
+    'finalUnitPrice',
+    'lineTotal',
+    'subtotal',
+    'total',
+    'totalPrice',
+    'priceCoins',
+    'chargedAmount',
+    'groupId',
+    'percentage',
+    'markupPercentage',
+    'resellerStatus',
+    'exchangeRate',
+    'rateSnapshot',
+    'exchangeRateAtExecution',
+    'userId',
+    'financialSnapshot',
+    'pricingSnapshot',
+];
+
 // ── Global guards ─────────────────────────────────────────────────────────────
 router.use(authenticate, requireActiveUser);
 
@@ -84,6 +107,14 @@ const createOrderValidation = [
     body('quantity')
         .optional()
         .isInt({ min: 1 }).withMessage('quantity must be a positive integer'),
+    body().custom((value) => {
+        for (const field of forbiddenPricingFields) {
+            if (Object.prototype.hasOwnProperty.call(value || {}, field)) {
+                throw new Error('Client-supplied pricing fields are not accepted');
+            }
+        }
+        return true;
+    }),
 ];
 
 router.post('/orders', createOrderValidation, validate, me.placeOrder);
