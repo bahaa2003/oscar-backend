@@ -40,6 +40,7 @@ const seedBaseCurrency = async () => {
             symbol: '$',
             marketRate: 1,
             platformRate: 1,
+            decimalPlaces: 2,
             markupPercentage: 0,
             isActive: true,
             lastUpdatedAt: new Date(),
@@ -106,7 +107,7 @@ const updateCurrencyRate = async (code, updates) => {
     const doc = await Currency.findOne({ code: upper });
     if (!doc) throw new NotFoundError(`Currency '${upper}'`);
 
-    const { platformRate, markupPercentage, name, symbol, applyDebtAdjustment, adminId } = updates;
+    const { platformRate, decimalPlaces, markupPercentage, name, symbol, applyDebtAdjustment, adminId } = updates;
 
     // Capture old rate BEFORE mutation (needed for percentage calc)
     const oldRate = doc.platformRate;
@@ -137,6 +138,16 @@ const updateCurrencyRate = async (code, updates) => {
             );
         }
         doc.markupPercentage = markupPercentage;
+    }
+
+    if (decimalPlaces !== undefined) {
+        if (!Number.isInteger(decimalPlaces) || decimalPlaces < 0 || decimalPlaces > 6) {
+            throw new BusinessRuleError(
+                'decimalPlaces must be an integer between 0 and 6.',
+                'INVALID_DECIMAL_PLACES'
+            );
+        }
+        doc.decimalPlaces = decimalPlaces;
     }
 
     if (name !== undefined) doc.name = name;
@@ -236,7 +247,7 @@ const setCurrencyStatus = async (code, isActive) => {
  * @param {Object} data
  * @returns {Promise<Currency>}
  */
-const createCurrency = async ({ code, name, symbol, platformRate, marketRate, markupPercentage }) => {
+const createCurrency = async ({ code, name, symbol, platformRate, marketRate, markupPercentage, decimalPlaces = 2 }) => {
     const upper = (code ?? '').toUpperCase().trim();
     if (!/^[A-Z]{3}$/.test(upper)) {
         throw new BusinessRuleError(
@@ -249,6 +260,12 @@ const createCurrency = async ({ code, name, symbol, platformRate, marketRate, ma
     if (existing) {
         throw new ConflictError(`Currency '${upper}' already exists.`);
     }
+    if (!Number.isInteger(decimalPlaces) || decimalPlaces < 0 || decimalPlaces > 6) {
+        throw new BusinessRuleError(
+            'decimalPlaces must be an integer between 0 and 6.',
+            'INVALID_DECIMAL_PLACES'
+        );
+    }
 
     const doc = await Currency.create({
         code: upper,
@@ -256,6 +273,7 @@ const createCurrency = async ({ code, name, symbol, platformRate, marketRate, ma
         symbol,
         marketRate: marketRate ?? null,
         platformRate: parseFloat((platformRate || 1).toFixed(6)),
+        decimalPlaces,
         markupPercentage: markupPercentage ?? 0,
         isActive: true,
         lastUpdatedAt: new Date(),

@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
 const config = require('../../config/config');
 const { User, USER_STATUS, RESELLER_STATUS } = require('../users/user.model');
 const Group = require('../groups/group.model');
-const { getDefaultGroup } = require('../groups/group.service');
+const { getHighestPercentageGroup } = require('../groups/group.service');
 const {
     ResellerApplication,
     RESELLER_APPLICATION_STATUS,
@@ -292,6 +292,16 @@ const assertActiveAssignableGroup = async (groupId, session = null) => {
     if (group.deletedAt) throw new BusinessRuleError('Selected group is deleted.', 'GROUP_DELETED');
     if (!group.isActive) throw new BusinessRuleError('Selected group is inactive.', 'GROUP_INACTIVE');
     return group;
+};
+
+const resolveSuspensionReturnGroup = async (application, session = null) => {
+    if (application?.previousGroupId) {
+        const previous = await Group.findById(application.previousGroupId).session(session);
+        if (previous && !previous.deletedAt && previous.isActive) {
+            return previous;
+        }
+    }
+    return getHighestPercentageGroup({ session });
 };
 
 const buildAuditContext = (auditContext, fallbackActorId, fallbackRole) => ({
@@ -695,11 +705,7 @@ const suspendApplication = async (applicationId, adminId, { suspensionReason } =
 
             const user = await User.findOne({ _id: application.userId, resellerStatus: RESELLER_STATUS.APPROVED }).session(session);
             if (!user) throw new BusinessRuleError('Approved reseller user was not found.', 'RESELLER_RECONCILIATION_REQUIRED');
-            const defaultGroup = await getDefaultGroup();
-            const sessionDefaultGroup = await Group.findById(defaultGroup._id).session(session);
-            if (!sessionDefaultGroup || sessionDefaultGroup.deletedAt || !sessionDefaultGroup.isActive || !sessionDefaultGroup.isDefault) {
-                throw new BusinessRuleError('Default group is not available for suspension.', 'DEFAULT_GROUP_NOT_CONFIGURED');
-            }
+            const returnGroup = await resolveSuspensionReturnGroup(application, session);
 
             const now = new Date();
             application.status = RESELLER_APPLICATION_STATUS.SUSPENDED;
@@ -712,7 +718,7 @@ const suspendApplication = async (applicationId, adminId, { suspensionReason } =
             user.resellerStatus = RESELLER_STATUS.SUSPENDED;
             user.resellerSuspendedAt = now;
             user.resellerSuspensionReason = reason;
-            user.groupId = sessionDefaultGroup._id;
+            user.groupId = returnGroup._id;
             await user.save({ session });
             await runTestHook('afterResellerSuspended', { application });
             return application;

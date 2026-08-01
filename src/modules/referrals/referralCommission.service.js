@@ -12,6 +12,9 @@ const {
 } = require('./referralCommission.model');
 const { BusinessRuleError } = require('../../shared/errors/AppError');
 const { Decimal } = require('../../shared/utils/decimalPrecision');
+const { getCurrencySnapshot } = require('../../services/currencyConverter.service');
+
+const REFERRAL_COMMISSION_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 const COMMISSION_EVALUATION_OUTCOME = Object.freeze({
     CREATED: 'CREATED',
@@ -29,6 +32,7 @@ const COMMISSION_EVALUATION_REASON = Object.freeze({
     REFERRER_DELETED: 'REFERRER_DELETED',
     SELF_REFERRAL: 'SELF_REFERRAL',
     COMMISSION_STOPPED: 'COMMISSION_STOPPED',
+    REFERRAL_WINDOW_EXPIRED: 'REFERRAL_WINDOW_EXPIRED',
     ZERO_SOURCE_AMOUNT: 'ZERO_SOURCE_AMOUNT',
     ZERO_AFTER_ROUNDING: 'ZERO_AFTER_ROUNDING',
 });
@@ -43,8 +47,10 @@ const toDecimalStrict = (value, code = 'INVALID_REFERRAL_COMMISSION_CONFIG') => 
     }
 };
 
-const toMoneyString = (value) => (
-    new Decimal(value).toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toFixed(2)
+const toMoneyString = (value, decimalPlaces = 2) => (
+    new Decimal(value)
+        .toDecimalPlaces(decimalPlaces, Decimal.ROUND_HALF_UP)
+        .toFixed(decimalPlaces)
 );
 
 const toRateString = (value) => (
@@ -102,6 +108,10 @@ const makeEvaluation = ({
     referrerId = null,
     ratePercent = null,
     amountUsd = null,
+    amount = null,
+    currency = null,
+    referrerExchangeRateFromUsd = null,
+    eligibilityWindowEndsAt = null,
     evaluatedAt,
 }) => ({
     version: COMMISSION_CALCULATION_VERSION,
@@ -111,10 +121,24 @@ const makeEvaluation = ({
     referrerId,
     ratePercent,
     amountUsd,
+    amount,
+    currency,
+    referrerExchangeRateFromUsd,
+    eligibilityWindowEndsAt,
     evaluatedAt,
 });
 
-const notEligible = ({ reason, referrerId = null, ratePercent = null, amountUsd = null, evaluatedAt }) => ({
+const notEligible = ({
+    reason,
+    referrerId = null,
+    ratePercent = null,
+    amountUsd = null,
+    amount = null,
+    currency = null,
+    referrerExchangeRateFromUsd = null,
+    eligibilityWindowEndsAt = null,
+    evaluatedAt,
+}) => ({
     eligible: false,
     evaluation: makeEvaluation({
         outcome: COMMISSION_EVALUATION_OUTCOME.NOT_ELIGIBLE,
@@ -122,6 +146,10 @@ const notEligible = ({ reason, referrerId = null, ratePercent = null, amountUsd 
         referrerId,
         ratePercent,
         amountUsd,
+        amount,
+        currency,
+        referrerExchangeRateFromUsd,
+        eligibilityWindowEndsAt,
         evaluatedAt,
     }),
 });
@@ -185,6 +213,17 @@ const evaluateDepositCommission = async ({
         });
     }
 
+    const eligibilityWindowEndsAt = new Date(referredUser.referredAt.getTime() + REFERRAL_COMMISSION_WINDOW_MS);
+    if (evaluatedAt >= eligibilityWindowEndsAt) {
+        return notEligible({
+            reason: COMMISSION_EVALUATION_REASON.REFERRAL_WINDOW_EXPIRED,
+            referrerId: referredUser.referredBy,
+            ratePercent: policy.ratePercent,
+            eligibilityWindowEndsAt,
+            evaluatedAt,
+        });
+    }
+
     if (objectIdsEqual(referredUser._id, referredUser.referredBy)) {
         return notEligible({
             reason: COMMISSION_EVALUATION_REASON.SELF_REFERRAL,
@@ -195,7 +234,7 @@ const evaluateDepositCommission = async ({
     }
 
     const referrerQuery = User.findById(referredUser.referredBy)
-        .select('status deletedAt +referrerCommissionStoppedAt');
+        .select('status deletedAt currency +referrerCommissionStoppedAt');
     if (session) referrerQuery.session(session);
     const referrer = await referrerQuery;
 
@@ -243,12 +282,24 @@ const evaluateDepositCommission = async ({
         .dividedBy(100)
         .toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
 
-    if (commissionAmountUsd.isZero()) {
+    const referrerCurrency = String(referrer.currency || COMMISSION_CURRENCY).trim().toUpperCase();
+    const referrerCurrencySnapshot = await getCurrencySnapshot(referrerCurrency, { session, bypassCache: true });
+    const referrerRate = referrerCurrencySnapshot.platformRate;
+    const referrerDecimalPlaces = referrerCurrencySnapshot.decimalPlaces;
+    const commissionAmount = commissionAmountUsd
+        .times(new Decimal(referrerRate))
+        .toDecimalPlaces(referrerDecimalPlaces, Decimal.ROUND_HALF_UP);
+
+    if (commissionAmount.isZero()) {
         return notEligible({
             reason: COMMISSION_EVALUATION_REASON.ZERO_AFTER_ROUNDING,
             referrerId: referrer._id,
             ratePercent: policy.ratePercent,
             amountUsd: commissionAmountUsd.toFixed(2),
+            amount: commissionAmount.toFixed(referrerDecimalPlaces),
+            currency: referrerCurrency,
+            referrerExchangeRateFromUsd: toRateString(referrerRate),
+            eligibilityWindowEndsAt,
             evaluatedAt,
         });
     }
@@ -258,12 +309,20 @@ const evaluateDepositCommission = async ({
         referrer,
         ratePercent: policy.ratePercent,
         commissionAmountUsd: commissionAmountUsd.toFixed(2),
+        commissionAmount: commissionAmount.toFixed(referrerDecimalPlaces),
+        commissionCurrency: referrerCurrency,
+        referrerExchangeRateFromUsd: toRateString(referrerRate),
+        eligibilityWindowEndsAt,
         evaluation: makeEvaluation({
             outcome: COMMISSION_EVALUATION_OUTCOME.CREATED,
             reason: COMMISSION_EVALUATION_REASON.CREATED,
             referrerId: referrer._id,
             ratePercent: policy.ratePercent,
             amountUsd: commissionAmountUsd.toFixed(2),
+            amount: commissionAmount.toFixed(referrerDecimalPlaces),
+            currency: referrerCurrency,
+            referrerExchangeRateFromUsd: toRateString(referrerRate),
+            eligibilityWindowEndsAt,
             evaluatedAt,
         }),
     };
@@ -302,7 +361,10 @@ const createDepositCommission = async ({
         sourceAmountUsd: toMoneyString(deposit.amountUsd),
         commissionRatePercent: evaluation.ratePercent,
         commissionAmountUsd: evaluation.amountUsd,
-        commissionCurrency: COMMISSION_CURRENCY,
+        commissionAmount: evaluation.amount || evaluation.amountUsd,
+        referrerCurrency: evaluation.currency || COMMISSION_CURRENCY,
+        referrerExchangeRateFromUsd: evaluation.referrerExchangeRateFromUsd || '1',
+        commissionCurrency: evaluation.currency || COMMISSION_CURRENCY,
         status: COMMISSION_STATUS.AVAILABLE,
         availableAt: deposit.reviewedAt,
         lockedAt: null,
@@ -310,6 +372,8 @@ const createDepositCommission = async ({
         cancelledAt: null,
         referralSource: referredUser.referralSource || null,
         referredAt: referredUser.referredAt,
+        calculatedAt: deposit.reviewedAt,
+        eligibilityWindowEndsAt: evaluation.eligibilityWindowEndsAt || null,
         calculationVersion: COMMISSION_CALCULATION_VERSION,
         policySource: COMMISSION_POLICY_SOURCE,
         idempotencyKey: `deposit:${deposit._id}:referral-commission:v1`,
@@ -393,6 +457,7 @@ const getCommissionSummaryForReferrer = async (referrerId) => {
 module.exports = {
     COMMISSION_EVALUATION_OUTCOME,
     COMMISSION_EVALUATION_REASON,
+    REFERRAL_COMMISSION_WINDOW_MS,
     getReferralCommissionPolicy,
     evaluateDepositCommission,
     createDepositCommission,

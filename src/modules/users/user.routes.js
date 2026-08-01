@@ -7,6 +7,7 @@ const validate = require('../../shared/middlewares/validate');
 const authenticate = require('../../shared/middlewares/authenticate');
 const authorize = require('../../shared/middlewares/authorize');
 const requirePermission = require('../../shared/middlewares/requirePermission');
+const requireProfileComplete = require('../../shared/middlewares/requireProfileComplete');
 const { createUpload } = require('../../shared/middlewares/upload');
 
 const avatarUpload = createUpload('avatars');
@@ -30,14 +31,14 @@ router.get('/me', userController.getMyProfile);
  * @desc   Update own profile (name, email, phone, username, password)
  * @access Any authenticated user
  */
-router.patch('/me', userController.updateMyProfile);
+router.patch('/me', requireProfileComplete, userController.updateMyProfile);
 
 /**
  * @route  PATCH /api/users/me/avatar
  * @desc   Update own avatar
  * @access Any authenticated user
  */
-router.patch('/me/avatar', avatarUpload.single('avatar'), userController.updateMyAvatar);
+router.patch('/me/avatar', requireProfileComplete, avatarUpload.single('avatar'), userController.updateMyAvatar);
 
 // ── Admin: Queries ────────────────────────────────────────────────────────────
 

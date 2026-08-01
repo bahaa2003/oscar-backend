@@ -267,4 +267,36 @@ const toUnifiedStatus = (raw) => {
     }
 };
 
-module.exports = { BaseProviderAdapter, UNIFIED_STATUS, toUnifiedStatus };
+const TARGET_ID_KEYS = Object.freeze([
+    'playerId',
+    'player_Id',
+    'player_id',
+    'targetId',
+    'target_id',
+    'target',
+    'uid',
+    'userId',
+    'user_id',
+    'accountId',
+    'account_id',
+    'username',
+    'login',
+    'email',
+]);
+
+const extractTargetId = (params = {}) => {
+    for (const key of TARGET_ID_KEYS) {
+        const value = params[key];
+        if (value !== undefined && value !== null && String(value).trim() !== '') {
+            return String(value).trim();
+        }
+    }
+    return '';
+};
+
+module.exports = {
+    BaseProviderAdapter,
+    UNIFIED_STATUS,
+    toUnifiedStatus,
+    extractTargetId,
+};

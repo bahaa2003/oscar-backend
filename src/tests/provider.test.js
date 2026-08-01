@@ -89,6 +89,7 @@ const { createOrder } = require('../modules/orders/order.service');
 
 beforeAll(async () => {
     await connectTestDB();
+    await Promise.all([Provider.init(), ProviderProduct.init()]);
 });
 
 afterAll(async () => {

@@ -13,6 +13,7 @@ const authenticate = require('../../shared/middlewares/authenticate');
 const authorize = require('../../shared/middlewares/authorize');
 const requirePermission = require('../../shared/middlewares/requirePermission');
 const requireActiveUser = require('../../shared/middlewares/requireActiveUser');
+const requireProfileComplete = require('../../shared/middlewares/requireProfileComplete');
 const { createUpload } = require('../../shared/middlewares/upload');
 
 const depositUpload = createUpload('deposits');
@@ -33,6 +34,7 @@ router.use(authenticate);
 router.post(
     '/',
     requireActiveUser,
+    requireProfileComplete,
     depositUpload.single('receipt'),
     depositController.analyzeReceiptUpload,
     createDepositValidation, validate,
@@ -47,6 +49,8 @@ router.post(
  */
 router.get(
     '/',
+    requireActiveUser,
+    requireProfileComplete,
     listDepositsValidation, validate,
     depositController.listDeposits
 );

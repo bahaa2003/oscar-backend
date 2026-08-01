@@ -100,15 +100,45 @@ const endSessionQuietly = (session) => {
     }
 };
 
+const SENSITIVE_ORDER_FIELD_REGEX = /(password|token|secret|credential|authorization|api[_-]?key)/i;
+
+const buildOrderFieldDetailsBlock = (order) => {
+    const values = order?.customerInput?.values || order?.customInputs || {};
+    const fieldSnapshots = order?.customerInput?.fieldsSnapshot || order?.customerInput?.fields || [];
+    const labelByKey = new Map(
+        fieldSnapshots
+            .map((field) => [
+                field.key || field.name || field.id,
+                field.label || field.name || field.key || field.id,
+            ])
+            .filter(([key]) => Boolean(key))
+    );
+
+    const lines = Object.entries(values)
+        .filter(([key, value]) => (
+            !SENSITIVE_ORDER_FIELD_REGEX.test(String(key))
+            && value !== undefined
+            && value !== null
+            && String(value).trim() !== ''
+        ))
+        .map(([key, value]) => {
+            const label = labelByKey.get(key) || key;
+            return `${label}: ${String(value).slice(0, 200)}`;
+        });
+
+    return lines.length ? `\nالبيانات:\n${lines.join('\n')}` : '';
+};
+
 const notifyAdminOrderCreated = ({ order, userId, productName, quantity }) => {
     try {
         (async () => {
             const user = await User.findById(userId).select('name email').lean();
             const orderRef = order?.displayId || order?.orderNumber || order?._id;
             const userName = user?.name || user?.email || userId;
+            const fieldDetails = buildOrderFieldDetailsBlock(order);
 
             await whatsappService.sendAdminNotification(
-                `📦 *طلب جديد!*\nرقم: ${orderRef}\nالمستخدم: ${userName}\nالمنتج: ${productName}\nالكمية: ${quantity}`
+                `📦 *طلب جديد!*\nرقم: ${orderRef}\nالمستخدم: ${userName}\nالمنتج: ${productName}\nالكمية: ${quantity}${fieldDetails}`
             );
         })().catch((err) => {
             console.error('WhatsApp Notification failed:', err.message);
@@ -658,6 +688,7 @@ const _attemptCreateOrder = async (
                 userId,
                 productId: product._id,
                 orderNumber,
+                compatOrderId: orderNumber,
                 quantity: qty,
                 basePriceSnapshot: '0',
                 markupPercentageSnapshot: 0,
@@ -880,6 +911,7 @@ const _attemptCreateOrder = async (
             userId,
             productId: product._id,
             orderNumber,
+            compatOrderId: orderNumber,
             quantity: qty,
             basePriceSnapshot: pricing.basePrice,
             markupPercentageSnapshot: pricing.markupPercentage,
@@ -1146,9 +1178,9 @@ const markOrderAsFailed = async (orderId, auditContext = null) => {
         // The user must receive back exactly what was taken from their wallet.
         //
         // Source of truth (frozen at order creation):
-        //   walletDeducted   – amount taken from the wallet balance
-        //   creditUsedAmount – amount taken from the credit line
-        //   chargedAmount    – total (walletDeducted + creditUsed), fallback
+        //   walletDeducted   – total amount deducted from walletBalance
+        //   creditUsedAmount – informational debt portion within walletDeducted
+        //   chargedAmount    – legacy total fallback
         const walletPortion = Number(order.walletDeducted || 0);
         const creditPortion = Number(order.creditUsedAmount || 0);
 
@@ -1156,7 +1188,7 @@ const markOrderAsFailed = async (orderId, auditContext = null) => {
         // treat chargedAmount as a pure wallet charge (legacy orders).
         const refundWallet = walletPortion > 0 ? walletPortion : Number(order.chargedAmount || 0);
         const refundCredit = creditPortion;
-        const totalRefund = refundWallet + refundCredit;
+        const totalRefund = refundWallet;
 
         // ── Quantity-Only Billing: quantity refund instead of wallet ──────
         // For quantity_only orders, all financial fields are 0. The "refund"

@@ -30,6 +30,7 @@ const me = require('./me.controller');
 const depositController = require('../deposits/deposit.controller');
 const authenticate = require('../../shared/middlewares/authenticate');
 const requireActiveUser = require('../../shared/middlewares/requireActiveUser');
+const requireProfileComplete = require('../../shared/middlewares/requireProfileComplete');
 const { createUpload } = require('../../shared/middlewares/upload');
 const { body, param, query } = require('express-validator');
 const validate = require('../../shared/middlewares/validate');
@@ -72,6 +73,29 @@ router.use(authenticate, requireActiveUser);
  * @access Active user
  */
 router.get('/', me.getProfile);
+
+router.patch(
+    '/profile-completion',
+    [
+        body('country')
+            .notEmpty().withMessage('country is required')
+            .isString().trim()
+            .isLength({ min: 2, max: 2 }).withMessage('country must be a 2-letter code')
+            .toUpperCase(),
+        body('currency')
+            .notEmpty().withMessage('currency is required')
+            .isString().trim()
+            .isLength({ min: 3, max: 3 }).withMessage('currency must be a 3-letter ISO 4217 code')
+            .toUpperCase(),
+        body('referrerCode').optional().isString().trim().isLength({ max: 32 }),
+        body('invitationCode').optional().isString().trim().isLength({ max: 32 }),
+        body('referralCode').optional().isString().trim().isLength({ max: 32 }),
+    ],
+    validate,
+    me.completeProfile
+);
+
+router.use(requireProfileComplete);
 
 // ─── Wallet ───────────────────────────────────────────────────────────────────
 

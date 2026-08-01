@@ -40,9 +40,21 @@ const referralPayoutRequestSchema = new mongoose.Schema(
             required: [true, 'amountUsd is required'],
             validate: decimalStringValidator,
         },
+        amount: {
+            type: String,
+            default: null,
+            validate: {
+                validator(value) {
+                    return value == null || decimalStringValidator.validator(value);
+                },
+                message: '{PATH} must be a non-negative decimal string',
+            },
+        },
         currency: {
             type: String,
-            enum: [PAYOUT_CURRENCY],
+            uppercase: true,
+            trim: true,
+            match: [/^[A-Z]{3}$/, 'currency must be a 3-letter ISO code'],
             default: PAYOUT_CURRENCY,
         },
         method: {
@@ -120,9 +132,21 @@ const referralPayoutRequestSchema = new mongoose.Schema(
                 required: true,
                 validate: decimalStringValidator,
             },
+            amount: {
+                type: String,
+                default: null,
+                validate: {
+                    validator(value) {
+                        return value == null || decimalStringValidator.validator(value);
+                    },
+                    message: '{PATH} must be a non-negative decimal string',
+                },
+            },
             currency: {
                 type: String,
-                enum: [PAYOUT_CURRENCY],
+                uppercase: true,
+                trim: true,
+                match: [/^[A-Z]{3}$/, 'currency must be a 3-letter ISO code'],
                 default: PAYOUT_CURRENCY,
             },
             commissionIds: [{

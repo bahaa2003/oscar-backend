@@ -45,6 +45,14 @@ const orderSchema = new mongoose.Schema(
             default: null,
         },
 
+        compatOrderId: {
+            type: String,
+            trim: true,
+            unique: true,
+            sparse: true,
+            index: true,
+        },
+
         productId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'Product',
@@ -264,6 +272,13 @@ const orderSchema = new mongoose.Schema(
             type: mongoose.Schema.Types.Mixed,  // Number (Royal Crown) OR String (Alkasr "ID_xxx")
             default: null,
             index: true,              // cron queries PROCESSING + providerOrderId != null
+        },
+
+        providerRequestId: {
+            type: String,
+            trim: true,
+            default: null,
+            index: true,
         },
 
         /**

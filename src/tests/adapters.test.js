@@ -97,6 +97,14 @@ const makeAlkasrAdapter = (clientOverrides = {}) => {
     return { adapter, client };
 };
 
+const makeRoyalAdapter = (clientOverrides = {}) => {
+    const client = makeFakeAxios(clientOverrides);
+    axios.create.mockReturnValueOnce(client);
+    const adapter = new RoyalCrownAdapter(royalProvider);
+    adapter._client = client;
+    return { adapter, client };
+};
+
 // ═════════════════════════════════════════════════════════════════════════════
 // [1] TorosfonAdapter — getProducts()
 // ═════════════════════════════════════════════════════════════════════════════
@@ -241,6 +249,20 @@ describe('[2] TorosfonAdapter — placeOrder()', () => {
             },
         });
     });
+
+    it('resolves target aliases when playerId is not supplied', async () => {
+        const { adapter, client } = makeTorosAdapter();
+        client.get.mockResolvedValueOnce({ data: { id: 506, status: 'pending' } });
+
+        await adapter.placeOrder({
+            productId: 'T2',
+            amount: 1,
+            uid: 'alias-player',
+            referenceId: 'ref-alias',
+        });
+
+        expect(client.get.mock.calls[0][1].params.player_Id).toBe('alias-player');
+    });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -293,6 +315,39 @@ describe('[3] TorosfonAdapter — checkOrder() / checkOrders()', () => {
         });
         const results = await adapter.checkOrders([800]);
         expect(results[0].providerStatus).toBe('done');
+    });
+
+    it('checkOrders() parses documented { success, message, data: [...] } batch response', async () => {
+        const { adapter, client } = makeTorosAdapter();
+        client.get.mockResolvedValueOnce({
+            data: {
+                success: true,
+                message: '',
+                data: [{ order_id: 50, order_status: 'Pending' }],
+            },
+        });
+
+        const results = await adapter.checkOrders([50]);
+        expect(results).toHaveLength(1);
+        expect(results[0]).toMatchObject({
+            providerOrderId: 50,
+            providerStatus: 'Pending',
+        });
+    });
+
+    it('checkOrders() ignores top-level metadata keys when parsing historical object maps', async () => {
+        const { adapter, client } = makeTorosAdapter();
+        client.get.mockResolvedValueOnce({
+            data: {
+                success: true,
+                message: '',
+                801: { status: 'processing' },
+            },
+        });
+
+        const results = await adapter.checkOrders([801]);
+        expect(results).toHaveLength(1);
+        expect(results[0]).toMatchObject({ providerOrderId: 801, providerStatus: 'processing' });
     });
 });
 
@@ -433,6 +488,56 @@ describe('[5] AlkasrVipAdapter — placeOrder()', () => {
         const params = client.get.mock.calls[0][1].params;
         expect(params.playerId).toBe('');
         expect(params).not.toHaveProperty('referenceId');
+    });
+
+    it('resolves target aliases and forwards safe mapped product parameters only', async () => {
+        const { adapter, client } = makeAlkasrAdapter();
+        client.get.mockResolvedValueOnce({ data: { status: 'OK', data: { order_id: 1007, status: 'wait' } } });
+
+        await adapter.placeOrder({
+            productId: 'A5',
+            providerProductId: 'internal-provider-product',
+            amount: 4,
+            uid: 'alias-uid',
+            server: 'EU',
+            zoneId: '42',
+            rawResponse: { shouldNotForward: true },
+            referenceId: 'stable-ref',
+        });
+
+        const params = client.get.mock.calls[0][1].params;
+        expect(params).toMatchObject({
+            qty: 4,
+            playerId: 'alias-uid',
+            server: 'EU',
+            zoneId: '42',
+            order_uuid: 'stable-ref',
+        });
+        expect(params).not.toHaveProperty('providerProductId');
+        expect(params).not.toHaveProperty('referenceId');
+        expect(params).not.toHaveProperty('rawResponse');
+    });
+});
+
+describe('[5b] RoyalCrownAdapter — placeOrder()', () => {
+    it('resolves target aliases while preserving player_Id casing', async () => {
+        const { adapter, client } = makeRoyalAdapter();
+        client.get.mockResolvedValueOnce({ data: { id: 2001, status: 'Pending' } });
+
+        await adapter.placeOrder({
+            productId: 'R1',
+            amount: 2,
+            targetId: 'royal-target',
+            referenceId: 'royal-ref',
+        });
+
+        expect(client.get).toHaveBeenCalledWith('/api/PlaceOrder/R1/data', {
+            params: {
+                amount: 2,
+                player_Id: 'royal-target',
+                referenceId: 'royal-ref',
+            },
+        });
     });
 });
 

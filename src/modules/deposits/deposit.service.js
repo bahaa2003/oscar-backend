@@ -333,8 +333,17 @@ const commissionMatchesEvaluation = ({ deposit, ledger, commission }) => {
         && commission.sourceAmountUsd === toMoneyString(deposit.amountUsd)
         && commission.commissionRatePercent === evaluation.ratePercent
         && commission.commissionAmountUsd === evaluation.amountUsd
-        && commission.commissionCurrency === 'USD'
-        && commission.calculationVersion === 'v1'
+        && commission.commissionCurrency === (evaluation.currency || 'USD')
+        && (evaluation.amount == null || commission.commissionAmount === evaluation.amount)
+        && (evaluation.referrerExchangeRateFromUsd == null || commission.referrerExchangeRateFromUsd === evaluation.referrerExchangeRateFromUsd)
+        && (
+            !evaluation.eligibilityWindowEndsAt
+            || (
+                commission.eligibilityWindowEndsAt
+                && new Date(commission.eligibilityWindowEndsAt).getTime() === new Date(evaluation.eligibilityWindowEndsAt).getTime()
+            )
+        )
+        && ['v1', 'v2'].includes(commission.calculationVersion)
         && commission.policySource === 'ENV_REFERRAL_COMMISSION'
         && commission.idempotencyKey === `deposit:${deposit._id}:referral-commission:v1`;
 };

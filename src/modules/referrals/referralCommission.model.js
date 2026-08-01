@@ -10,7 +10,7 @@ const COMMISSION_STATUS = Object.freeze({
 });
 
 const COMMISSION_CURRENCY = 'USD';
-const COMMISSION_CALCULATION_VERSION = 'v1';
+const COMMISSION_CALCULATION_VERSION = 'v2';
 const COMMISSION_POLICY_SOURCE = 'ENV_REFERRAL_COMMISSION';
 
 const decimalStringValidator = {
@@ -90,8 +90,50 @@ const referralCommissionSchema = new mongoose.Schema(
         },
         commissionCurrency: {
             type: String,
-            enum: [COMMISSION_CURRENCY],
+            uppercase: true,
+            trim: true,
+            match: [/^[A-Z]{3}$/, 'commissionCurrency must be a 3-letter ISO code'],
             default: COMMISSION_CURRENCY,
+            immutable: true,
+        },
+        referrerCurrency: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            match: [/^[A-Z]{3}$/, 'referrerCurrency must be a 3-letter ISO code'],
+            default: null,
+            immutable: true,
+        },
+        referrerExchangeRateFromUsd: {
+            type: String,
+            default: null,
+            validate: {
+                validator(value) {
+                    return value == null || decimalStringValidator.validator(value);
+                },
+                message: '{PATH} must be a decimal string',
+            },
+            immutable: true,
+        },
+        commissionAmount: {
+            type: String,
+            default: null,
+            validate: {
+                validator(value) {
+                    return value == null || decimalStringValidator.validator(value);
+                },
+                message: '{PATH} must be a decimal string',
+            },
+            immutable: true,
+        },
+        calculatedAt: {
+            type: Date,
+            default: null,
+            immutable: true,
+        },
+        eligibilityWindowEndsAt: {
+            type: Date,
+            default: null,
             immutable: true,
         },
 
@@ -139,7 +181,6 @@ const referralCommissionSchema = new mongoose.Schema(
         },
         calculationVersion: {
             type: String,
-            enum: [COMMISSION_CALCULATION_VERSION],
             default: COMMISSION_CALCULATION_VERSION,
             immutable: true,
         },

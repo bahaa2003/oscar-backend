@@ -27,8 +27,8 @@ const referralCommissionEvaluationSchema = new mongoose.Schema(
     {
         version: {
             type: String,
-            enum: ['v1'],
-            default: 'v1',
+            enum: ['v1', 'v2'],
+            default: 'v2',
         },
         outcome: {
             type: String,
@@ -57,6 +57,24 @@ const referralCommissionEvaluationSchema = new mongoose.Schema(
         },
         amountUsd: {
             type: String,
+            default: null,
+        },
+        amount: {
+            type: String,
+            default: null,
+        },
+        currency: {
+            type: String,
+            default: null,
+            uppercase: true,
+            trim: true,
+        },
+        referrerExchangeRateFromUsd: {
+            type: String,
+            default: null,
+        },
+        eligibilityWindowEndsAt: {
+            type: Date,
             default: null,
         },
         evaluatedAt: {

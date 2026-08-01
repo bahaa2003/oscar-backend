@@ -237,6 +237,55 @@ describe('[2] executeOrder -- provider cases', () => {
         expect(returned.status).toBe(ORDER_STATUS.COMPLETED);
     });
 
+    it('reuses one stable provider request identifier across retries', async () => {
+        const order = await makeOrderDoc(customer._id);
+        const provider = makeMockProvider({
+            placeOrder: jest.fn().mockResolvedValue({
+                success: true,
+                providerOrderId: 9101,
+                providerStatus: 'Pending',
+                rawResponse: { order: 9101, status: 'Pending' },
+                errorMessage: null,
+            }),
+        });
+
+        await executeOrder(order._id, provider);
+        await executeOrder(order._id, provider);
+
+        expect(provider.placeOrder).toHaveBeenCalledTimes(2);
+        const firstParams = provider.placeOrder.mock.calls[0][0];
+        const secondParams = provider.placeOrder.mock.calls[1][0];
+        expect(firstParams.referenceId).toBeDefined();
+        expect(firstParams.referenceId).toBe(secondParams.referenceId);
+        expect(firstParams.order_uuid).toBe(firstParams.referenceId);
+        expect(secondParams.order_uuid).toBe(firstParams.referenceId);
+        const fresh = await Order.findById(order._id);
+        expect(fresh.providerRequestId).toBe(firstParams.referenceId);
+    });
+
+    it('assigns different provider request identifiers to different local orders', async () => {
+        const orderA = await makeOrderDoc(customer._id, { idempotencyKey: 'provider-request-a' });
+        const orderB = await makeOrderDoc(customer._id, { idempotencyKey: 'provider-request-b' });
+        const provider = makeMockProvider({
+            placeOrder: jest.fn().mockResolvedValue({
+                success: true,
+                providerOrderId: 9102,
+                providerStatus: 'Pending',
+                rawResponse: { order: 9102, status: 'Pending' },
+                errorMessage: null,
+            }),
+        });
+
+        await executeOrder(orderA._id, provider);
+        await executeOrder(orderB._id, provider);
+
+        const firstParams = provider.placeOrder.mock.calls[0][0];
+        const secondParams = provider.placeOrder.mock.calls[1][0];
+        expect(firstParams.referenceId).toBeDefined();
+        expect(secondParams.referenceId).toBeDefined();
+        expect(firstParams.referenceId).not.toBe(secondParams.referenceId);
+    });
+
     it('Audit: PROVIDER_ORDER_PLACED log written on Case B', async () => {
         const order = await makeOrderDoc(customer._id);
 

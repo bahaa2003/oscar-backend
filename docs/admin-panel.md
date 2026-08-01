@@ -447,7 +447,7 @@ PATCH /api/admin/deposits/:id/review
 
 MongoDB must support transactions. There is no unsafe non-transaction fallback. Repeated healthy approvals are idempotent and use the stored `referralCommissionEvaluation` snapshot rather than the current referrer state or current rate. Inconsistent legacy deposits, missing CREATED commissions, or conflicting commission snapshots return `DEPOSIT_RECONCILIATION_REQUIRED`.
 
-Phase 2C creates commission records with status `AVAILABLE` only. Phase 2D exposes read-only user dashboard APIs. Phase 2E adds payout review under `/api/admin/referral-payouts` for admins/supervisors with the existing wallet-management permission. Admin rejection changes the payout to `REJECTED` and atomically unlocks linked commissions back to `AVAILABLE`. Admin settlement changes the payout to `PAID` and all linked commissions to `PAID`; `WALLET` settlement also credits the referrer's wallet once through one `WalletTransaction` with `sourceType = REFERRAL_PAYOUT`, while `MANUAL` settlement requires an external reference and does not credit the wallet.
+Phase 2C creates commission records with status `AVAILABLE` only. Phase 4C limits eligibility to exactly 30 x 24 hours from `User.referredAt` and stores both USD analytical fields and payable account-currency commission snapshots for new v2 commissions. Phase 2D exposes read-only user dashboard APIs. Phase 2E/4C adds payout review under `/api/admin/referral-payouts` for admins/supervisors with the existing wallet-management permission. Admin rejection changes the payout to `REJECTED` and atomically unlocks linked commissions back to `AVAILABLE`. Admin settlement changes the payout to `PAID` and all linked commissions to `PAID`; `WALLET` settlement also credits the referrer's wallet once through one `WalletTransaction` with `sourceType = REFERRAL_PAYOUT` only when payout currency matches the wallet/account currency, while `MANUAL` settlement requires an external reference and does not credit the wallet.
 
 No external payment provider, payout cancellation endpoint, commission amount editing, production migration, or legacy auto-repair is implemented by Phase 2E.
 
@@ -470,7 +470,7 @@ POST /api/admin/reseller-applications/:id/suspend
 POST /api/admin/reseller-applications/:id/reactivate
 ```
 
-The state machine is `NONE -> PENDING`, `PENDING -> APPROVED|REJECTED`, `APPROVED -> SUSPENDED`, and `SUSPENDED -> APPROVED`. Approval validates an active target pricing Group and updates `ResellerApplication`, `User.resellerStatus`, `User.resellerGroupId`, and `User.groupId` in one MongoDB transaction. Rejection stores a safe reason and leaves the user's Group unchanged. Suspension moves the user to the explicit active Default Group. Reactivation restores the assigned reseller Group or an admin-selected replacement Group.
+The state machine is `NONE -> PENDING`, `PENDING -> APPROVED|REJECTED`, `APPROVED -> SUSPENDED`, and `SUSPENDED -> APPROVED`. Approval validates an active target pricing Group and updates `ResellerApplication`, `User.resellerStatus`, `User.resellerGroupId`, and `User.groupId` in one MongoDB transaction. Rejection stores a safe reason and leaves the user's Group unchanged. Phase 4C suspension restores the saved pre-reseller Group when valid, otherwise the current highest eligible active non-deleted Group. Reactivation restores the assigned reseller Group or an admin-selected replacement Group.
 
 Phase 3B adds a read-only admin pricing diagnostic:
 

@@ -125,6 +125,8 @@ Redirect to Google consent screen. Requires `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_
 
 Google OAuth callback. Returns JWT + user on success.
 
+New Google users may receive `profileCompletionRequired: true` and `missingProfileFields` after the one-time PKCE handoff is exchanged. The frontend must route those users to the existing profile-completion screen before protected application pages are used.
+
 **Response `200`:**
 ```json
 { "success": true, "data": { "token": "...", "user": { ... } } }
@@ -139,6 +141,10 @@ All routes require `Authorization: Bearer <token>` and `status === ACTIVE`.
 ### GET /api/me
 
 Returns authenticated user's profile and wallet balance.
+
+### PATCH /api/me/profile-completion
+
+Authenticated active Google users with incomplete profile data complete their server-owned profile by submitting `country` and `currency`. If OAuth started from a trusted referral state, the backend preserves that inviter and the returned profile metadata marks the referral as locked; the client must not replace it. If OAuth started without referral, one optional referral code may be supplied while the profile is incomplete and `referredBy` has never been set. Existing Google users and email-linked accounts cannot acquire or replace referral attribution through this endpoint.
 
 **Response `200`:**
 ```json
@@ -691,7 +697,7 @@ Single deposit detail.
 
 Approve a deposit and credit the user's wallet inside one MongoDB transaction. The transaction claims the deposit by `_id + PENDING`, reruns final financial validation, updates approval snapshots, credits `User.walletBalance`, inserts one `WalletTransaction` with `sourceType`, `sourceId`, `operation`, and `idempotencyKey`, evaluates referral commission eligibility, inserts one `ReferralCommission` when eligible, and stores `referralCommissionEvaluation` on the deposit. Audit and notification side effects run after commit only. MongoDB must support transactions; there is no unsafe non-transaction fallback.
 
-Referral commission rate comes only from trusted backend config (`REFERRAL_COMMISSION_ENABLED`, `REFERRAL_COMMISSION_RATE_PERCENT`). Disabled, zero-rate, or expected ineligible referrals still allow the deposit approval to succeed without a commission. Eligible commission insert or evaluation snapshot failure rolls back the deposit approval, wallet credit, and wallet ledger. Deposit approval creates commission records only; it does not credit the referrer's wallet or settle payouts. Phase 2E exposes separate payout request/admin settlement APIs below.
+Referral commission rate comes only from trusted backend config (`REFERRAL_COMMISSION_ENABLED`, `REFERRAL_COMMISSION_RATE_PERCENT`). Disabled, zero-rate, expired-window, or expected ineligible referrals still allow the deposit approval to succeed without a commission. Eligibility lasts exactly 30 x 24 hours from `User.referredAt`; approvals at the exact end timestamp are not eligible. Eligible commission insert or evaluation snapshot failure rolls back the deposit approval, wallet credit, and wallet ledger. Deposit approval creates commission records only; it does not credit the referrer's wallet or settle payouts. Phase 4C commission records keep USD analytical snapshots and the payable amount in the referrer's account currency.
 
 **Body:** `{ "amount": 95, "currency": "EGP" }` (optional correction fields)
 
@@ -748,12 +754,14 @@ All currencies sorted by code.
 
 ### PATCH /api/admin/currencies/:code
 
-Update a currency's platform rate.
+Update a currency's platform rate and optional payable precision.
 
 **Body:**
 ```json
-{ "platformRate": 3.75, "markupPercentage": 2, "isActive": true }
+{ "platformRate": 3.75, "decimalPlaces": 2, "markupPercentage": 2, "isActive": true }
 ```
+
+`decimalPlaces` is an integer from `0` to `6`. It controls destination-currency rounding for new referral commission payable amounts and payout payable totals. It does not reprice or rewrite existing immutable snapshots.
 
 ---
 
@@ -911,7 +919,7 @@ Deleted invitees are excluded. Non-deleted invitees are included regardless of l
 
 ### POST /api/referrals/me/payouts
 
-Creates a payout request for selected own `AVAILABLE` commissions. The client submits commission ids and a requested method only; the backend derives `referrerId` from the JWT and calculates the canonical USD total from persisted commission snapshots.
+Creates a payout request for selected own `AVAILABLE` commissions. The client submits commission ids and a requested method only; the backend derives `referrerId` from the JWT and calculates canonical totals from persisted commission snapshots. New currency-aware payouts require every selected commission to share the same `commissionCurrency`; mixed-currency requests are rejected. Responses include USD analytical `amountUsd` and payable `amount/currency`.
 
 **Body:**
 ```json
@@ -932,7 +940,8 @@ Creates a payout request for selected own `AVAILABLE` commissions. The client su
     "status": "PENDING",
     "method": "WALLET",
     "amountUsd": "15.50",
-    "currency": "USD",
+    "amount": "775.00",
+    "currency": "EGP",
     "commissionCount": 3,
     "requestedAt": "2026-07-30T10:00:00.000Z"
   }
@@ -941,7 +950,7 @@ Creates a payout request for selected own `AVAILABLE` commissions. The client su
 
 ### GET /api/referrals/me/payouts
 
-Returns the authenticated referrer's own payout history. Supports `status`, `method`, `page`, `limit`, `dateFrom`, and `dateTo`. Decimal amounts remain strings. No wallet balance, internal idempotency key, admin notes, or foreign referrer data is returned.
+Returns the authenticated referrer's own payout history. Supports `status`, `method`, `page`, `limit`, `dateFrom`, and `dateTo`. Decimal amounts remain strings. No wallet balance, internal idempotency key, admin notes, or foreign referrer data is returned. The browser must display the backend `currency` and must not convert or mix currencies locally.
 
 ### GET /api/referrals/me/payouts/:id
 
@@ -1041,7 +1050,7 @@ Rejects a `PENDING` application, stores a safe rejection reason, sets the user's
 
 ### POST /api/admin/reseller-applications/:id/suspend
 
-Suspends an `APPROVED` reseller and moves the user to the explicit active Default Group in one transaction.
+Suspends an `APPROVED` reseller in one transaction. Phase 4C restores the user's saved pre-reseller Group when that Group is still active and non-deleted; otherwise the backend assigns the current highest eligible normal Group. `Group.isDefault` does not control reseller suspension fallback.
 
 ```json
 { "suspensionReason": "Paused commercial access." }

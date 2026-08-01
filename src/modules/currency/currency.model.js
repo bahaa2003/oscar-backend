@@ -62,6 +62,17 @@ const currencySchema = new mongoose.Schema(
             min: [0.000001, 'Platform rate must be positive'],
         },
 
+        decimalPlaces: {
+            type: Number,
+            default: 2,
+            min: [0, 'Decimal places cannot be negative'],
+            max: [6, 'Decimal places cannot exceed 6'],
+            validate: {
+                validator: Number.isInteger,
+                message: 'Decimal places must be an integer',
+            },
+        },
+
         /**
          * markupPercentage — optional admin-controlled markup layered ON TOP of
          * the raw market rate when computing a suggested platformRate.

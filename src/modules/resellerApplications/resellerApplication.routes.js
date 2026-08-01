@@ -3,12 +3,13 @@
 const { Router } = require('express');
 const authenticate = require('../../shared/middlewares/authenticate');
 const requireActiveUser = require('../../shared/middlewares/requireActiveUser');
+const requireProfileComplete = require('../../shared/middlewares/requireProfileComplete');
 const controller = require('./resellerApplication.controller');
 const { validateBody, validateQuery, schemas } = require('./resellerApplication.validation');
 
 const router = Router();
 
-router.use(authenticate, requireActiveUser);
+router.use(authenticate, requireActiveUser, requireProfileComplete);
 
 router.post('/me', validateBody(schemas.submitApplication), controller.submitMine);
 router.get('/me/current', controller.getMyCurrent);

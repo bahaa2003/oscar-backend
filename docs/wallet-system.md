@@ -348,7 +348,7 @@ The `unique_wallet_source_operation` index is a partial unique index on `{ userI
 
 ### Referral Commission Records
 
-When `REFERRAL_COMMISSION_ENABLED=true` and `REFERRAL_COMMISSION_RATE_PERCENT` is a valid configured rate greater than zero, a newly approved eligible referred user's deposit creates one `ReferralCommission` inside the same deposit transaction. The commission snapshots the referrer, referred user, deposit id, wallet transaction id, source amount/currency/exchange rate/USD amount, rate, calculated USD commission, referral source, referred-at timestamp, policy source, and calculation version `v1`.
+When `REFERRAL_COMMISSION_ENABLED=true` and `REFERRAL_COMMISSION_RATE_PERCENT` is a valid configured rate greater than zero, a newly approved eligible referred user's deposit creates one `ReferralCommission` inside the same deposit transaction. Phase 4C eligibility lasts exactly 30 x 24 hours from `User.referredAt`; approvals at the exact deadline or later do not create a commission. The commission snapshots the referrer, referred user, deposit id, wallet transaction id, source amount/currency/exchange rate/USD amount, rate, calculated USD commission, referrer's account currency, referrer exchange rate from USD, payable commission amount/currency, referral source, referred-at timestamp, eligibility window end, policy source, and calculation version `v2`.
 
 New commissions are created with status `AVAILABLE`. Deposit approval does not credit the referrer's wallet and does not create a referrer `WalletTransaction`. Repeat approval reads the stored `referralCommissionEvaluation` snapshot; it does not re-evaluate current referrer status or the current configured rate.
 
@@ -356,7 +356,7 @@ New commissions are created with status `AVAILABLE`. Deposit approval does not c
 
 Phase 2E adds payout settlement as a separate admin-reviewed workflow. Creating a payout request does not change wallet balance; it creates `ReferralPayoutRequest(PENDING)` and locks selected commissions `AVAILABLE -> LOCKED` in one transaction. Rejection unlocks commissions back to `AVAILABLE` without wallet credit.
 
-Only `WALLET` settlement credits the referrer's wallet. That transaction updates `User.walletBalance`, inserts exactly one `WalletTransaction`, marks linked commissions `PAID`, and marks the payout `PAID` with the same MongoDB session. The wallet ledger source identity is:
+Only `WALLET` settlement credits the referrer's wallet. Phase 4C requires the payout currency to match the wallet/account currency; no silent conversion is performed at settlement time. That transaction updates `User.walletBalance`, inserts exactly one `WalletTransaction`, marks linked commissions `PAID`, and marks the payout `PAID` with the same MongoDB session. The wallet ledger source identity is:
 
 - `sourceType = REFERRAL_PAYOUT`
 - `sourceId = <referralPayoutRequestId>`

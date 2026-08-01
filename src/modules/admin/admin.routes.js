@@ -229,13 +229,14 @@ router.get('/currencies', requirePermission('MANAGE_CURRENCIES'), catchAsync(asy
 }));
 
 router.patch('/currencies/:code', adminOnly, validateBody(schemas.updateCurrency), catchAsync(async (req, res) => {
-    const { platformRate, markupPercentage, isActive, applyDebtAdjustment } = req.body;
+    const { platformRate, decimalPlaces, markupPercentage, isActive, applyDebtAdjustment } = req.body;
     const code = req.params.code.toUpperCase();
 
     // Delegate to the canonical currency service (handles debt adjustment internally)
     const currencyService = require('../currency/currency.service');
     const { currency, debtAdjustment } = await currencyService.updateCurrencyRate(code, {
         platformRate,
+        decimalPlaces,
         markupPercentage,
         applyDebtAdjustment,
         adminId: req.user._id,
@@ -256,7 +257,7 @@ router.patch('/currencies/:code', adminOnly, validateBody(schemas.updateCurrency
 }));
 
 router.post('/currencies', adminOnly, validateBody(schemas.createCurrency), catchAsync(async (req, res) => {
-    const { code, name, symbol, platformRate, marketRate, markupPercentage, isActive } = req.body;
+    const { code, name, symbol, platformRate, marketRate, decimalPlaces, markupPercentage, isActive } = req.body;
 
     // Check for duplicate code
     const existing = await Currency.findOne({ code: code.toUpperCase() });
@@ -270,6 +271,7 @@ router.post('/currencies', adminOnly, validateBody(schemas.createCurrency), catc
         name,
         symbol,
         platformRate,
+        decimalPlaces,
         marketRate: marketRate ?? null,
         markupPercentage: markupPercentage ?? 0,
         isActive: isActive !== false,

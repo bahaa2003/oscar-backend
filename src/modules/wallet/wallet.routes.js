@@ -6,6 +6,7 @@ const authenticate = require('../../shared/middlewares/authenticate');
 const authorize = require('../../shared/middlewares/authorize');
 const requirePermission = require('../../shared/middlewares/requirePermission');
 const requireActiveUser = require('../../shared/middlewares/requireActiveUser');
+const requireProfileComplete = require('../../shared/middlewares/requireProfileComplete');
 
 const router = Router();
 
@@ -14,14 +15,14 @@ const router = Router();
  * @desc   Get authenticated user's wallet statistics (aggregated)
  * @access Active users (Customer or Admin)
  */
-router.get('/stats', authenticate, requireActiveUser, walletController.getMyWalletStats);
+router.get('/stats', authenticate, requireActiveUser, requireProfileComplete, walletController.getMyWalletStats);
 
 /**
  * @route  GET /api/wallet/transactions
  * @desc   Get authenticated user's own transaction history
  * @access Active users (Customer or Admin)
  */
-router.get('/transactions', authenticate, requireActiveUser, walletController.getMyTransactions);
+router.get('/transactions', authenticate, requireActiveUser, requireProfileComplete, walletController.getMyTransactions);
 
 /**
  * @route  GET /api/wallet/users/:userId/transactions

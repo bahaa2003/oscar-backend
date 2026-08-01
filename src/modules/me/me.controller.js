@@ -7,14 +7,20 @@
  * Ownership isolation: users can ONLY see their own data.
  */
 
-const { User } = require('../users/user.model');
+const { User, REFERRAL_SOURCE } = require('../users/user.model');
+const { Currency } = require('../currency/currency.model');
 const { WalletTransaction } = require('../wallet/walletTransaction.model');
 const orderService = require('../orders/order.service');
 const depositService = require('../deposits/deposit.service');
 const productService = require('../products/product.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
-const { NotFoundError } = require('../../shared/errors/AppError');
+const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
+const { decorateAuthUser, getMissingProfileFields } = require('../auth/auth.service');
+const {
+    resolveRegistrationReferrer,
+    createGoogleOAuthAttributionFields,
+} = require('../referrals/referralAttribution.service');
 const {
     resolveEffectivePricingContext,
     calculateProductPrice,
@@ -27,6 +33,15 @@ const { usdToLocal } = require('../../shared/utils/currencyMath');
 const parsePage = (v) => Math.max(1, parseInt(v, 10) || 1);
 const parseLimit = (v) => Math.min(100, Math.max(1, parseInt(v, 10) || 20));
 
+const normalizeCountryCode = (value) => String(value || '').trim().toUpperCase();
+const normalizeCurrencyCode = (value) => String(value || '').trim().toUpperCase();
+
+const resolveTrustedProfileReferral = async (user) => {
+    if (!user?.referredBy || user.referralSource !== REFERRAL_SOURCE.GOOGLE_OAUTH) return null;
+    const referrer = await User.findById(user.referredBy).select('referralCode').lean();
+    return referrer?.referralCode || null;
+};
+
 // =============================================================================
 // PROFILE  —  GET /api/me
 // =============================================================================
@@ -36,13 +51,17 @@ const parseLimit = (v) => Math.min(100, Math.max(1, parseInt(v, 10) || 20));
  */
 const getProfile = catchAsync(async (req, res) => {
     const user = await User.findById(req.user._id)
-        .select('-password -__v')
+        .select('-password -__v +referredBy +referredAt +referralSource')
         .populate('groupId', 'name percentage isActive billingMode');
 
     if (!user) throw new NotFoundError('User');
 
     const groupData = user.groupId;
     const billingMode = groupData?.billingMode || 'standard';
+
+    const missingProfileFields = getMissingProfileFields(user);
+    const profileCompletionRequired = Boolean(user.googleId) && missingProfileFields.length > 0;
+    const trustedReferralCode = await resolveTrustedProfileReferral(user);
 
     sendSuccess(res, {
         _id: user._id,
@@ -58,8 +77,94 @@ const getProfile = catchAsync(async (req, res) => {
         quantityLimit: user.quantityLimit || 0,
         quantityUsed: user.quantityUsed || 0,
         quantityRemaining: user.quantityRemaining || 0,
+        country: user.country || '',
+        profileCompletionRequired,
+        missingProfileFields: profileCompletionRequired ? missingProfileFields : [],
+        profileCompletionReferral: profileCompletionRequired && trustedReferralCode ? {
+            code: trustedReferralCode,
+            locked: true,
+            source: user.referralSource,
+        } : null,
         createdAt: user.createdAt,
     }, 'Profile retrieved.');
+});
+
+const completeProfile = catchAsync(async (req, res) => {
+    const user = await User.findById(req.user._id).select('+password +referredBy +referredAt +referralSource');
+    if (!user) throw new NotFoundError('User');
+
+    const missingBefore = getMissingProfileFields(user);
+    if (missingBefore.length === 0) {
+        return sendSuccess(res, { user: decorateAuthUser(user) }, 'Profile already complete.');
+    }
+
+    const country = normalizeCountryCode(req.body.country);
+    const currency = normalizeCurrencyCode(req.body.currency);
+    if (!/^[A-Z]{2}$/.test(country)) {
+        throw new BusinessRuleError('A valid country code is required.', 'INVALID_COUNTRY');
+    }
+    if (!/^[A-Z]{3}$/.test(currency)) {
+        throw new BusinessRuleError('A valid account currency is required.', 'INVALID_CURRENCY');
+    }
+
+    const currencyDoc = await Currency.findOne({ code: currency, isActive: true }).lean();
+    if (!currencyDoc) {
+        throw new BusinessRuleError('Selected currency is not active.', 'INVALID_CURRENCY');
+    }
+
+    const update = {
+        country,
+        currency,
+    };
+
+    const canApplyCompletionReferral = Boolean(user.googleId)
+        && !user.password
+        && !user.referredBy;
+    const referralCode = String(req.body.referrerCode || req.body.invitationCode || req.body.referralCode || '').trim();
+
+    if (referralCode && canApplyCompletionReferral) {
+        const referral = await resolveRegistrationReferrer({
+            referrerCode: referralCode,
+            email: user.email,
+        });
+        if (referral.applied) {
+            Object.assign(update, createGoogleOAuthAttributionFields(referral.referrer));
+        } else if (referral.normalizedReferrerCode) {
+            throw new BusinessRuleError('Referral code could not be applied.', referral.reason);
+        }
+    } else if (referralCode && user.referredBy) {
+        const lockedCode = await resolveTrustedProfileReferral(user);
+        if (lockedCode && lockedCode.toUpperCase() === referralCode.toUpperCase()) {
+            // Trusted OAuth referral already written; keep it immutable.
+        } else {
+            throw new BusinessRuleError('Referral attribution is already locked for this account.', 'REFERRAL_ALREADY_SET');
+        }
+    } else if (referralCode && (!user.googleId || user.password)) {
+        throw new BusinessRuleError('Referral code cannot be applied to this account.', 'REFERRAL_COMPLETION_NOT_ALLOWED');
+    }
+
+    const completed = await User.findOneAndUpdate(
+        {
+            _id: user._id,
+            deletedAt: null,
+            $or: [
+                { country: { $in: [null, ''] } },
+                { country: { $exists: false } },
+                { currency: { $in: [null, ''] } },
+                { currency: { $exists: false } },
+            ],
+            ...(update.referredBy ? { referredBy: null } : {}),
+        },
+        { $set: update },
+        { new: true }
+    );
+
+    if (!completed) {
+        const fresh = await User.findById(user._id);
+        return sendSuccess(res, { user: decorateAuthUser(fresh) }, 'Profile already complete.');
+    }
+
+    sendSuccess(res, { user: decorateAuthUser(completed) }, 'Profile completed.');
 });
 
 // =============================================================================
@@ -409,6 +514,7 @@ const getDeposit = catchAsync(async (req, res) => {
 
 module.exports = {
     getProfile,
+    completeProfile,
     getWallet,
     getTransactions,
     getOrders,

@@ -3,6 +3,7 @@
 const { Router } = require('express');
 const authenticate = require('../../shared/middlewares/authenticate');
 const requireActiveUser = require('../../shared/middlewares/requireActiveUser');
+const requireProfileComplete = require('../../shared/middlewares/requireProfileComplete');
 const validate = require('../../shared/middlewares/validate');
 const referralController = require('./referral.controller');
 const {
@@ -16,7 +17,7 @@ const {
 
 const router = Router();
 
-router.use(authenticate, requireActiveUser);
+router.use(authenticate, requireActiveUser, requireProfileComplete);
 
 router.get('/me/dashboard', dashboardValidation, validate, referralController.getMyDashboard);
 router.get('/me/commissions', commissionListValidation, validate, referralController.listMyCommissions);

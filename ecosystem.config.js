@@ -35,6 +35,10 @@ module.exports = {
             env: {
                 NODE_ENV: 'development',
             },
+            env_staging: {
+                NODE_ENV: 'staging',
+                WHATSAPP_PM2_WORKER: '0',
+            },
             env_production: {
                 NODE_ENV: 'production',
             },

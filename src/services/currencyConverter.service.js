@@ -189,10 +189,21 @@ const getConversionRate = async (currencyCode, options = false) => {
     return currDoc ? currDoc.platformRate : 1;
 };
 
+const getCurrencySnapshot = async (currencyCode, options = false) => {
+    const upper = (currencyCode ?? '').toUpperCase().trim();
+    const currDoc = await _getCurrency(upper, options);
+    return {
+        code: currDoc?.code || 'USD',
+        platformRate: currDoc ? currDoc.platformRate : 1,
+        decimalPlaces: currDoc?.decimalPlaces ?? 2,
+    };
+};
+
 module.exports = {
     convertUsdToUserCurrency,
     convertUserCurrencyToUsd,
     getConversionRate,
+    getCurrencySnapshot,
     invalidateCurrencyCache,
     // Exported for tests only
     _getCurrency,

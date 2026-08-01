@@ -20,6 +20,7 @@
  */
 
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 const { Order, ORDER_STATUS, MAX_RETRY_COUNT, ORDER_EXECUTION_TYPES } = require('../orders/order.model');
 const { getExternalProductId } = require('../products/product.service');
 const { refundWalletAtomic } = require('../wallet/wallet.service');
@@ -34,6 +35,29 @@ const {
 } = require('../audit/audit.constants');
 const { toInternalStatus, isTerminal, requiresRefund } = require('../providers/statusMapper');
 const { notifyOrderCompleted, notifyOrderFailed } = require('../notifications/notification.service');
+
+const ensureProviderRequestId = async (orderId) => {
+    const generated = crypto.randomUUID();
+    const updated = await Order.findOneAndUpdate(
+        {
+            _id: orderId,
+            $or: [
+                { providerRequestId: null },
+                { providerRequestId: '' },
+                { providerRequestId: { $exists: false } },
+            ],
+        },
+        { $set: { providerRequestId: generated } },
+        { new: true }
+    ).select('providerRequestId');
+
+    if (updated?.providerRequestId) return updated.providerRequestId;
+
+    const existing = await Order.findById(orderId).select('providerRequestId');
+    if (existing?.providerRequestId) return existing.providerRequestId;
+
+    throw new Error('Unable to assign provider request id.');
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IDEMPOTENT REFUND
@@ -78,16 +102,16 @@ const refundFailedOrder = async (order) => {
         // The user must receive back exactly what was taken from their wallet.
         //
         // Source of truth (frozen at order creation):
-        //   walletDeducted   – amount taken from the wallet balance
-        //   creditUsedAmount – amount taken from the credit line
-        //   chargedAmount    – total (fallback for legacy orders)
+        //   walletDeducted   – total amount deducted from walletBalance
+        //   creditUsedAmount – informational debt portion within walletDeducted
+        //   chargedAmount    – legacy total fallback
         const walletPortion = Number(order.walletDeducted || 0);
         const creditPortion = Number(order.creditUsedAmount || 0);
 
         // Fallback: if split fields are 0 but chargedAmount exists, use it
         const refundWallet = walletPortion > 0 ? walletPortion : Number(order.chargedAmount || 0);
         const refundCredit = creditPortion;
-        const totalRefund = refundWallet + refundCredit;
+        const totalRefund = refundWallet;
 
         if (totalRefund <= 0) {
             // Nothing to refund — undo the CAS flag and bail
@@ -274,6 +298,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         rawCustomerValues,
         order.productId?.providerMapping ?? null
     );
+    const providerRequestId = await ensureProviderRequestId(order._id);
 
     // ── Call the provider ──────────────────────────────────────────────────────
     console.log(`[Fulfillment] Placing order ${orderId} with provider…`);
@@ -284,6 +309,9 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             externalProductId: externalProductId ?? String(order.productId._id),
             quantity: order.quantity,
             ...mappedCustomerFields,   // ← spread translated customer fields onto params
+            referenceId: providerRequestId,
+            order_uuid: providerRequestId,
+            orderUuid: providerRequestId,
         });
     } catch (err) {
         // Classify the error: transient (network/timeout) vs hard rejection.

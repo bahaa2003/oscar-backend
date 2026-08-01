@@ -285,8 +285,8 @@ Tests all three wallet operations.
 ### 9f. Phase 3A reseller/sub-agent application suite
 
 **Covers:**
-- `resellerApplicationPhase3A.test.js`: model defaults, unique application/idempotency indexes, partial unique pending application per user, user submit/current/history APIs, duplicate and concurrent submissions, client-supplied state stripping, admin list/details RBAC, approval and Group assignment transaction, rejection, suspension to the explicit Default Group, reactivation with restore/replacement Group, bounded retry, rollback with no post-commit side effects, and non-regression for referral attribution, commissions, payouts, and auth roles.
-- `defaultGroup.test.js`: explicit Default Group selection and protection, required by reseller suspension.
+- `resellerApplicationPhase3A.test.js`: model defaults, unique application/idempotency indexes, partial unique pending application per user, user submit/current/history APIs, duplicate and concurrent submissions, client-supplied state stripping, admin list/details RBAC, approval and Group assignment transaction, rejection, suspension to previous/highest eligible Group, reactivation with restore/replacement Group, bounded retry, rollback with no post-commit side effects, and non-regression for referral attribution, commissions, payouts, and auth roles.
+- `defaultGroup.test.js`: explicit Default Group selection and protection retained for compatibility and administrative fallback behavior.
 - Phase 3A targeted gate:
 ```bash
 npm.cmd test -- resellerApplicationPhase3A.test.js defaultGroup.test.js
@@ -323,6 +323,26 @@ node scripts/systemReadinessPreflight.js --check
 ```
 
 `systemReadinessPreflight.js` aggregates MongoDB transaction topology, Default Group readiness, referral/wallet/commission/payout/reseller pricing indexes, duplicate/null order-number risks, order pricing snapshots, and required configuration presence. It prints aggregate status only, does not print connection URIs or credentials, and must not be run on production/staging without explicit authorization.
+
+### 9i. Phase 4C business-flow correction suite
+
+- `phase4cBusinessContract.test.js`: highest eligible Group assignment for email and Google signup, referral not changing Group selection, Google profile-completion gating and referral first-write rules, direct protected-route bypass rejection for incomplete Google users, 30-day referral commission window, account-currency commission calculation, configured destination-currency precision including `ROUND_HALF_UP`, currency-aware payouts, reseller suspension Group restoration/fallback, high-precision Decimal order snapshots, and read-only Phase 4C preflight classification.
+- `phase4cBusinessContractPreflight.js --check`: read-only aggregate classifier for incorrect Default Group assignment, missing Google profile fields, expired-window commission anomalies, legacy USD-only commissions, mixed/inconsistent payouts, invalid currency snapshots, provider/order status review signals, high-precision number storage, and suspended reseller Group fallback issues. It performs no repairs, no index creation, no provider calls, and must not be run against production/staging without explicit authorization.
+
+Focused command:
+
+```bash
+npm.cmd test -- --silent src/tests/phase4cBusinessContract.test.js
+```
+
+Phase 4B Staging readiness adds two explicit staging-only commands. These use `STAGING_MONGO_URI`, not the default runtime `MONGO_URI`:
+
+```bash
+node scripts/stagingIndexRollout.js --staging --check
+node scripts/stagingReadinessOrchestrator.js --staging --check
+```
+
+`stagingIndexRollout.js --staging --apply` may be used only during an approved Staging index rollout after duplicate blockers are resolved. It never deletes or edits conflicting records and refuses production-like database names.
 
 Production/staging result for this closure: `NOT RUN - No explicitly authorized safe production/staging database was supplied.`
 

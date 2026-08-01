@@ -72,6 +72,9 @@ const createCommission = async ({
     sourceAmountUsd: '100.00',
     commissionRatePercent: '5',
     commissionAmountUsd: amount,
+    commissionAmount: amount,
+    referrerCurrency: currency,
+    referrerExchangeRateFromUsd: currency === 'USD' ? '1' : '50',
     commissionCurrency: currency,
     status,
     availableAt: new Date('2026-02-01T00:00:00.000Z'),
@@ -190,11 +193,7 @@ describe('Phase 2E payout request transaction', () => {
         const foreign = await createCommission({ referrer: other, invitee, amount: '1.00' });
         const locked = await createCommission({ referrer, invitee, status: COMMISSION_STATUS.LOCKED, amount: '1.00' });
         const paid = await createCommission({ referrer, invitee, status: COMMISSION_STATUS.PAID, amount: '1.00' });
-        const eur = await createCommission({ referrer, invitee, amount: '1.00' });
-        await ReferralCommission.collection.updateOne(
-            { _id: eur._id },
-            { $set: { commissionCurrency: 'EUR' } }
-        );
+        const eur = await createCommission({ referrer, invitee, amount: '1.00', currency: 'EUR' });
 
         await expect(payoutService.createPayoutRequest(referrer._id, { commissionIds: [own._id, own._id], method: 'WALLET' }))
             .rejects.toMatchObject({ code: 'DUPLICATE_PAYOUT_COMMISSION_IDS' });
@@ -204,8 +203,8 @@ describe('Phase 2E payout request transaction', () => {
             .rejects.toMatchObject({ code: 'COMMISSION_NOT_AVAILABLE' });
         await expect(payoutService.createPayoutRequest(referrer._id, { commissionIds: [paid._id], method: 'WALLET' }))
             .rejects.toMatchObject({ code: 'COMMISSION_NOT_AVAILABLE' });
-        await expect(payoutService.createPayoutRequest(referrer._id, { commissionIds: [eur._id], method: 'WALLET' }))
-            .rejects.toMatchObject({ code: 'INVALID_COMMISSION_CURRENCY' });
+        await expect(payoutService.createPayoutRequest(referrer._id, { commissionIds: [own._id, eur._id], method: 'WALLET' }))
+            .rejects.toMatchObject({ code: 'MIXED_PAYOUT_CURRENCIES' });
 
         expect(await ReferralPayoutRequest.countDocuments()).toBe(0);
         expect((await ReferralCommission.findById(own._id)).status).toBe(COMMISSION_STATUS.AVAILABLE);

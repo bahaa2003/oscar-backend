@@ -36,11 +36,11 @@ Phase 2D adds authenticated referral dashboard routes under `/api/referrals/me/*
 | `GET /api/referrals/me/payouts` | Own payout history with status/method/date pagination filters |
 | `GET /api/referrals/me/payouts/:id` | One own payout request |
 
-The backend derives ownership from `req.user._id`. `referrerId`, `userId`, and `referredBy` query/body overrides are rejected. Commission totals come from immutable `ReferralCommission` rows and are returned as Decimal strings in USD. Invitee records expose display name, masked email, joined timestamp, referral source, and grouped commission summary only.
+The backend derives ownership from `req.user._id`. `referrerId`, `userId`, and `referredBy` query/body overrides are rejected. Commission totals come from immutable `ReferralCommission` rows and are returned as Decimal strings. New Phase 4C commissions include USD analytical values and payable values in the referrer's account currency. Invitee records expose display name, masked email, joined timestamp, referral source, and grouped commission summary only.
 
-Phase 2E lets the authenticated referrer request payout of selected own `AVAILABLE` commissions. The backend calculates the USD total, creates a `PENDING` payout request, and locks the selected commissions in one transaction. Users cannot submit `referrerId`, change commission amounts, mark commissions paid, reject requests, settle requests, mutate referral balances, or access another user's payout.
+Phase 2E/4C lets the authenticated referrer request payout of selected own `AVAILABLE` commissions. The backend requires a single commission currency, calculates USD analytical total plus payable `amount/currency`, creates a `PENDING` payout request, and locks the selected commissions in one transaction. Users cannot mix currencies, submit `referrerId`, change commission amounts, mark commissions paid, reject requests, settle requests, mutate referral balances, or access another user's payout.
 
-Admin review is separate. Rejection unlocks commissions; `WALLET` settlement credits the referrer's wallet once after admin approval; `MANUAL` settlement records an external reference without wallet credit. No user-facing payout cancellation, external payment provider, or retroactive commission generation exists.
+Admin review is separate. Rejection unlocks commissions; `WALLET` settlement credits the referrer's wallet once after admin approval only when payout currency matches the wallet/account currency; `MANUAL` settlement records an external reference without wallet credit. No browser-side conversion, user-facing payout cancellation, external payment provider, automatic legacy conversion, or retroactive commission generation exists.
 
 ---
 
@@ -62,7 +62,7 @@ User responses do not expose reviewer identity, full internal snapshots, group p
 
 Approved reseller/sub-agent status affects future catalog, quote, and order prices only through the backend pricing resolver. Customers see backend-resolved prices in product/catalog responses and may request read-only quotes with `POST /api/pricing/me/quote`. The client submits product ids, quantities, and order fields only; it cannot submit authoritative prices, totals, Groups, percentages, reseller state, exchange rates, or another `userId`.
 
-Suspended resellers do not continue receiving reseller pricing. Future orders use the effective non-reseller/default Group state, while old orders keep their immutable snapshots. Referral commissions, payout requests, and referrer wallet balances are not changed by reseller pricing.
+Suspended resellers do not continue receiving reseller pricing. Phase 4C restores the saved pre-reseller Group when valid, otherwise the current highest eligible normal Group; future orders use that effective non-reseller Group state, while old orders keep their immutable snapshots. Referral commissions, payout requests, and referrer wallet balances are not changed by reseller pricing.
 
 ---
 
@@ -405,6 +405,8 @@ Single deposit detail. Ownership enforced — customers can only view their own 
    → Redirect to Google consent screen
 
 2. Google redirects to GET /api/auth/google/callback
+
+Phase 4C restores the Google profile-completion gate. After the PKCE handoff exchange, a new Google user missing `country` or `currency` receives `profileCompletionRequired` and `missingProfileFields`; protected application pages are blocked until `/api/me/profile-completion` stores those fields. A referral from trusted OAuth state is locked and cannot be replaced. If OAuth started without a referral, one optional referral code may be supplied during completion only while the profile is incomplete and `referredBy` is still unset.
    → If new user:
        created with verified=true, status=PENDING
        admin must still approve

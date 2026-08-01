@@ -8,6 +8,7 @@ const authenticate = require('../../shared/middlewares/authenticate');
 const authorize = require('../../shared/middlewares/authorize');
 const requirePermission = require('../../shared/middlewares/requirePermission');
 const requireActiveUser = require('../../shared/middlewares/requireActiveUser');
+const requireProfileComplete = require('../../shared/middlewares/requireProfileComplete');
 
 const router = Router();
 
@@ -21,21 +22,21 @@ router.use(authenticate);
  * @desc   Place a new order
  * @access Active Customer only
  */
-router.post('/', requireActiveUser, authorize('CUSTOMER'), createOrderValidation, validate, orderController.createOrder);
+router.post('/', requireActiveUser, requireProfileComplete, authorize('CUSTOMER'), createOrderValidation, validate, orderController.createOrder);
 
 /**
  * @route  GET /api/orders/my
  * @desc   Get current user's orders
  * @access Active Customer only
  */
-router.get('/my', requireActiveUser, authorize('CUSTOMER'), orderController.getMyOrders);
+router.get('/my', requireActiveUser, requireProfileComplete, authorize('CUSTOMER'), orderController.getMyOrders);
 
 /**
  * @route  GET /api/orders/my/:id
  * @desc   Get a specific order belonging to the current user
  * @access Active Customer only
  */
-router.get('/my/:id', requireActiveUser, authorize('CUSTOMER'), orderIdParamValidation, validate, orderController.getMyOrder);
+router.get('/my/:id', requireActiveUser, requireProfileComplete, authorize('CUSTOMER'), orderIdParamValidation, validate, orderController.getMyOrder);
 
 // ── Admin Routes ──────────────────────────────────────────────────────────────
 

@@ -36,7 +36,7 @@
  */
 
 const axios = require('axios');
-const { BaseProviderAdapter } = require('./base.adapter');
+const { BaseProviderAdapter, extractTargetId } = require('./base.adapter');
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 
@@ -144,7 +144,7 @@ class TorosfonAdapter extends BaseProviderAdapter {
     async placeOrder(params) {
         const productId = params.productId ?? params.externalProductId;
         const amount = params.amount ?? params.quantity;
-        const playerId = params.playerId ?? '';
+        const playerId = extractTargetId(params);
         const referenceId = params.referenceId ?? '';
 
         try {
@@ -283,12 +283,31 @@ class TorosfonAdapter extends BaseProviderAdapter {
             params: { orders: JSON.stringify(orderIds) },
         });
 
-        // Normalise object-map → array
-        return Object.entries(data).map(([id, item]) => ({
-            providerOrderId: parseInt(id, 10),
-            providerStatus: item.status ?? 'Pending',
-            rawResponse: item,
-        }));
+        if (data?.success === false) return [];
+
+        const payload = Array.isArray(data)
+            ? data
+            : (Array.isArray(data?.data) ? data.data : data);
+
+        if (Array.isArray(payload)) {
+            return payload
+                .map((item) => ({
+                    providerOrderId: parseInt(String(item.order_id ?? item.orderId ?? item.id), 10),
+                    providerStatus: item.order_status ?? item.status ?? 'Pending',
+                    rawResponse: item,
+                }))
+                .filter((item) => Number.isFinite(item.providerOrderId));
+        }
+
+        const metaKeys = new Set(['success', 'message', 'data', 'error', 'errors']);
+        return Object.entries(payload || {})
+            .filter(([id]) => !metaKeys.has(String(id)))
+            .map(([id, item]) => ({
+                providerOrderId: parseInt(id, 10),
+                providerStatus: item.order_status ?? item.status ?? 'Pending',
+                rawResponse: item,
+            }))
+            .filter((item) => Number.isFinite(item.providerOrderId));
     }
 
     // ── Account / Balance ─────────────────────────────────────────────────────

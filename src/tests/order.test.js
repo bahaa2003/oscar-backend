@@ -1,5 +1,9 @@
 'use strict';
 
+jest.mock('../modules/whatsapp/whatsapp.service', () => ({
+    sendAdminNotification: jest.fn().mockResolvedValue(true),
+}));
+
 /**
  * order.test.js — Financial Order Logic Test Suite
  * ─────────────────────────────────────────────────
@@ -18,6 +22,7 @@
  */
 
 const mongoose = require('mongoose');
+const whatsappService = require('../modules/whatsapp/whatsapp.service');
 const orderService = require('../modules/orders/order.service');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { Order } = require('../modules/orders/order.model');
@@ -52,6 +57,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+    jest.clearAllMocks();
     await clearCollections();
     // Recreate a default group after every clear so customers can be created
     defaultGroup = await createGroup({ name: 'Default', percentage: 0 });
@@ -116,6 +122,62 @@ describe('Manual product costPrice profit', () => {
         expect(Number(order.basePriceSnapshot)).toBe(100);
         expect(Number(order.finalPriceCharged)).toBe(100);
         expect(Number(order.profitUsd)).toBeCloseTo(60, 6);
+    });
+});
+
+describe('Order recovery compatibility', () => {
+    it('persists compatOrderId without replacing current orderNumber', async () => {
+        const customer = await createCustomer({ groupId: defaultGroup._id, walletBalance: 1000 });
+        const product = await createProduct({ basePrice: 75 });
+
+        const { order } = await placeOrder({ userId: customer._id, productId: product._id, quantity: 1 });
+        const freshOrder = await Order.findById(order._id);
+
+        expect(freshOrder.orderNumber).toBeTruthy();
+        expect(freshOrder.compatOrderId).toBe(freshOrder.orderNumber);
+        expect(Order.schema.path('pricingSnapshot')).toBeDefined();
+    });
+
+    it('includes validated dynamic customer fields in admin WhatsApp notification and excludes sensitive fields', async () => {
+        const customer = await createCustomer({ groupId: defaultGroup._id, walletBalance: 1000 });
+        const product = await createProduct({
+            basePrice: 25,
+            orderFields: [
+                {
+                    id: 'field-player',
+                    key: 'player_id',
+                    label: 'Player ID',
+                    type: 'text',
+                    required: true,
+                    isActive: true,
+                },
+                {
+                    id: 'field-token',
+                    key: 'api_token',
+                    label: 'API Token',
+                    type: 'text',
+                    required: false,
+                    isActive: true,
+                },
+            ],
+        });
+
+        await orderService.createOrder({
+            userId: customer._id,
+            productId: product._id,
+            quantity: 1,
+            orderFieldsValues: {
+                player_id: 'player-123',
+                api_token: 'should-not-appear',
+            },
+        });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        expect(whatsappService.sendAdminNotification).toHaveBeenCalled();
+        const message = whatsappService.sendAdminNotification.mock.calls.at(-1)[0];
+        expect(message).toContain('Player ID: player-123');
+        expect(message).not.toContain('should-not-appear');
+        expect(message).not.toContain('API Token');
     });
 });
 

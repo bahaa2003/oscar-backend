@@ -58,6 +58,8 @@ const makeDepositPayload = (overrides = {}) => ({
     ...overrides,
 });
 
+const recentReferralDate = () => new Date(Date.now() - 24 * 60 * 60 * 1000);
+
 const seedCurrency = () => Currency.updateOne(
     { code: 'EGP' },
     {
@@ -86,7 +88,7 @@ const createReferralApprovalFixture = async ({ referredOverrides = {}, referrerO
         walletBalance: 0,
         currency: 'EGP',
         referredBy: referrer._id,
-        referredAt: new Date('2026-01-01T00:00:00.000Z'),
+        referredAt: recentReferralDate(),
         referralSource: REFERRAL_SOURCE.EMAIL_REGISTRATION,
         ...referredOverrides,
     });
@@ -140,12 +142,20 @@ describe('Phase 2C deposit referral commission transaction', () => {
         expect(commissions[0].sourceAmountUsd).toBe('10.00');
         expect(commissions[0].commissionRatePercent).toBe('5');
         expect(commissions[0].commissionAmountUsd).toBe('0.50');
+        expect(commissions[0].commissionAmount).toBe('0.50');
+        expect(commissions[0].commissionCurrency).toBe('USD');
+        expect(commissions[0].referrerCurrency).toBe('USD');
+        expect(commissions[0].referrerExchangeRateFromUsd).toBe('1');
+        expect(commissions[0].eligibilityWindowEndsAt).toBeInstanceOf(Date);
         expect(freshDeposit.referralCommissionEvaluation).toMatchObject({
-            version: 'v1',
+            version: 'v2',
             outcome: 'CREATED',
             reason: 'CREATED',
             ratePercent: '5',
             amountUsd: '0.50',
+            amount: '0.50',
+            currency: 'USD',
+            referrerExchangeRateFromUsd: '1',
         });
         expect(freshDeposit.referralCommissionEvaluation.commissionId.toString())
             .toBe(commissions[0]._id.toString());

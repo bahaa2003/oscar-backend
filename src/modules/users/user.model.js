@@ -379,6 +379,14 @@ const userSchema = new mongoose.Schema(
             match: [/^[A-Z]{3}$/, 'currency must be a 3-letter ISO 4217 code (e.g. USD, SAR)'],
         },
 
+        country: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            default: null,
+            match: [/^[A-Z]{2}$/, 'country must be a 2-letter ISO country code (e.g. EG, SA)'],
+        },
+
         // ── Avatar ───────────────────────────────────────────────────────────
         /**
          * URL to the user's profile picture.

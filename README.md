@@ -52,6 +52,8 @@ Users can be assigned a **credit limit** by admins. Wallet pays first; any remai
 ### Group-Based Pricing
 Every user belongs to a **pricing group** with a markup percentage. Final order price = `basePrice × (1 + markup/100)`, rounded to 2 decimal places. Price is snapshot-frozen on the order at creation time.
 
+Normal email/password registration and new Google OAuth user creation assign the existing highest eligible active, non-deleted Group using the original highest-percentage resolver. `Group.isDefault` remains available for explicit administrative/fallback use, but it does not control normal registration.
+
 ### Reseller/Sub-Agent Applications
 Phase 3A adds a commercial reseller workflow. The backend state is `RESELLER`; the customer-facing label may be Sub-Agent/Reseller, but it is one workflow. This state lives in `User.resellerStatus` and is not an authentication role; no `RESELLER` or `SUB_AGENT` JWT role exists. Active customers can submit applications and read current/history status. Admins or supervisors with `MANAGE_USERS` can approve, reject, suspend, and reactivate applications. Review actions use MongoDB transactions with bounded retry, and audit/notification side effects run only after commit.
 
@@ -99,6 +101,16 @@ Nodemailer-backed email service supporting multiple SMTP providers (Gmail, Mailt
 
 ### Test Coverage
 Phase 4A stabilizes the previously failing provider, catalog, fulfillment, order polling, target-app, and adapter suites. The backend now treats provider/catalog financial values as canonical Decimal strings, stores explicit `CANCELED` for provider cancellations, allows legacy/null `orderNumber` values through a partial unique index, and verifies adapter calls with deterministic mocks. See `PHASE_4A_FULL_BACKEND_STABILIZATION_REPORT.md` for the exact command results.
+
+Phase 4B adds the Staging deployment readiness package. See `docs/staging-deployment-readiness.md` for the environment checklist, transaction topology requirement, index rollout plan, read-only verification orchestrator, PM2 notes, smoke tests, and rollback plan. Staging index rollout is explicit only:
+
+```bash
+node scripts/stagingIndexRollout.js --staging --check
+node scripts/stagingReadinessOrchestrator.js --staging --check
+node scripts/stagingIndexRollout.js --staging --apply
+```
+
+The Phase 4B scripts use `STAGING_MONGO_URI`, redact credentials, refuse production-like database names, and never repair or delete conflicting records.
 
 ---
 
@@ -462,13 +474,13 @@ Customer POST /api/me/deposits
 
 Deposit wallet ledger rows use `sourceType`, `sourceId`, `operation`, and `idempotencyKey`. The `unique_wallet_source_operation` index is a partial unique index on `{ userId, sourceType, sourceId, operation }`, so legacy wallet rows without complete source identity can still exist and require reconciliation.
 
-Referral commissions are config-driven by `REFERRAL_COMMISSION_ENABLED` and `REFERRAL_COMMISSION_RATE_PERCENT`; there is no positive hidden default and the client never supplies a rate. New eligible approvals create exactly one immutable `ReferralCommission` with source deposit and wallet-transaction snapshots in USD, status `AVAILABLE`, and idempotency key `deposit:<depositId>:referral-commission:v1`. The referrer's wallet is not credited by deposit approval and legacy approved deposits are not backfilled.
+Referral commissions are config-driven by `REFERRAL_COMMISSION_ENABLED` and `REFERRAL_COMMISSION_RATE_PERCENT`; there is no positive hidden default and the client never supplies a rate. New eligible approvals create exactly one immutable `ReferralCommission` with source deposit and wallet-transaction snapshots, USD analytical fields, the referrer's account-currency commission amount, status `AVAILABLE`, and idempotency key `deposit:<depositId>:referral-commission:v1`. Eligibility lasts exactly 30 x 24 hours from `User.referredAt`; approvals at the exact deadline or later are not eligible. The referrer's wallet is not credited by deposit approval and legacy approved deposits are not backfilled.
 
 Phase 2D exposes authenticated, read-only referral dashboard APIs under `/api/referrals/me/*`. The backend derives `referrerId` from the JWT user, returns the user's own referral code and relative invite path, aggregates commission totals from persisted `ReferralCommission` rows as Decimal strings, and lists privacy-safe invitees from `User.referredBy`. These APIs do not create payouts, mutate commission statuses, credit referrer wallets, or infer frontend origins from request headers.
 
-Phase 2E adds referral payout requests. Authenticated referrers may request payout of selected own `AVAILABLE` commissions with `POST /api/referrals/me/payouts`; the backend calculates the USD total, creates one `ReferralPayoutRequest` with status `PENDING`, and atomically moves every selected commission `AVAILABLE -> LOCKED` with `payoutRequestId` inside one MongoDB transaction. Admins with the existing wallet-management permission can list, inspect, reject, or settle payout requests under `/api/admin/referral-payouts`. Rejection atomically unlocks commissions back to `AVAILABLE`. `WALLET` settlement atomically credits the referrer's wallet once, inserts one `WalletTransaction` with source type `REFERRAL_PAYOUT`, marks linked commissions `PAID`, and marks the payout `PAID`; `MANUAL` settlement records a required external reference and marks commissions/payout as paid without wallet credit. External payment providers, production writes, and automatic legacy repair are not implemented.
+Phase 2E/4C referral payouts are currency-aware. Authenticated referrers may request payout of selected own `AVAILABLE` commissions with `POST /api/referrals/me/payouts`; the backend requires all selected commissions to share one `commissionCurrency`, calculates both USD analytical total and payable `amount/currency`, creates one `ReferralPayoutRequest(PENDING)`, and atomically moves every selected commission `AVAILABLE -> LOCKED` with `payoutRequestId` inside one MongoDB transaction. Admins with the existing wallet-management permission can list, inspect, reject, or settle payout requests under `/api/admin/referral-payouts`. Rejection atomically unlocks commissions back to `AVAILABLE`. `WALLET` settlement credits the referrer's wallet once only when the payout currency matches the wallet/account currency, inserts one `WalletTransaction` with source type `REFERRAL_PAYOUT`, marks linked commissions `PAID`, and marks the payout `PAID`; `MANUAL` settlement records a required external reference and marks commissions/payout as paid without wallet credit. Mixed-currency payout requests, external payment providers, production writes, and automatic legacy repair are not implemented.
 
-Phase 3A adds reseller/sub-agent applications. Customer-facing "Sub-Agent" and backend `RESELLER` describe the same commercial account state. User endpoints live under `/api/reseller-applications/me/*`; admin endpoints live under `/api/admin/reseller-applications/*` and require `MANAGE_USERS`. Approval assigns a pricing Group inside the same transaction as application and user updates. Suspension moves the user to the explicit Default Group; reactivation restores the reseller Group or an admin-selected replacement. This workflow does not change referral attribution, commission rates, payout state, wallet balances, or authentication roles.
+Phase 3A adds reseller/sub-agent applications. Customer-facing "Sub-Agent" and backend `RESELLER` describe the same commercial account state. User endpoints live under `/api/reseller-applications/me/*`; admin endpoints live under `/api/admin/reseller-applications/*` and require `MANAGE_USERS`. Approval assigns a pricing Group inside the same transaction as application and user updates. Suspension restores the user's saved pre-reseller Group when it remains active and non-deleted; otherwise it falls back to the current highest eligible normal Group. Reactivation restores the saved reseller Group or requires an admin-selected replacement if that Group is no longer valid. This workflow does not change referral attribution, commission rates, payout state, wallet balances, or authentication roles.
 
 Phase 3B makes reseller approval affect future catalog, quote, and order pricing through the backend `commercialPricing.service.js`. `Group.percentage` remains a commercial markup: `finalUnitPrice = basePrice x (1 + percentage / 100)`. An approved reseller receives reseller pricing only when the user is `ACTIVE`, not deleted, `resellerStatus = APPROVED`, `resellerGroupId` exists, `groupId` matches it, and the Group is active and not deleted. Suspended, pending, rejected, and normal customers do not receive reseller pricing unless their current non-reseller Group is otherwise valid. Order creation ignores/rejects client-submitted prices, percentages, Groups, reseller state, user ids, totals, and exchange rates; the server recalculates pricing and stores immutable order/item snapshots. Referral commissions and payout logic are unchanged and `Group.percentage` is not a referral commission rate.
 
@@ -601,6 +613,7 @@ Disabling 2FA:
 
 ### Currency Management
 - Set `platformRate` per currency
+- Set `decimalPlaces` per currency for destination commission/payout payable rounding
 - Set `markupPercentage` on top of market rate
 - Create new currencies
 - Toggle currency active status

@@ -75,7 +75,9 @@ referredBy 1 + referredAt -1
 
 `User` also stores reseller/sub-agent commercial state. These fields are account state, not authentication roles: `resellerStatus` (`NONE`, `PENDING`, `APPROVED`, `REJECTED`, `SUSPENDED`), `resellerApprovedAt`, `resellerApprovedBy`, `resellerRejectedAt`, `resellerRejectionReason`, `resellerSuspendedAt`, `resellerSuspensionReason`, `resellerReactivatedAt`, and `resellerGroupId`. `resellerGroupId` points to the approved reseller pricing Group; `groupId` is changed transactionally on approval/suspension/reactivation.
 
-Phase 3B uses those fields only for commercial pricing. An approved reseller receives reseller pricing only when `status = ACTIVE`, `deletedAt = null`, `resellerStatus = APPROVED`, `resellerGroupId` exists, `groupId` equals `resellerGroupId`, and the referenced Group is active and not deleted. Suspended resellers must use the explicit Default Group for future orders. These fields do not create a new authentication role and do not affect referral commission or payout rates.
+Phase 3B uses those fields only for commercial pricing. An approved reseller receives reseller pricing only when `status = ACTIVE`, `deletedAt = null`, `resellerStatus = APPROVED`, `resellerGroupId` exists, `groupId` equals `resellerGroupId`, and the referenced Group is active and not deleted. Suspended resellers must not receive reseller pricing for future orders. These fields do not create a new authentication role and do not affect referral commission or payout rates.
+
+**Phase 4C correction:** `User.country` stores an ISO 3166-1 alpha-2 account country. New Google OAuth users may be created with `country` and `currency` missing and must complete them through `/api/me/profile-completion` before protected app routes are usable. Normal email/password registration and new Google user creation assign the highest active, non-deleted Group by existing percentage ordering; `Group.isDefault` does not control normal registration. Reseller suspension restores the saved pre-reseller Group if it remains active and non-deleted, otherwise the current highest eligible Group.
 
 ---
 
@@ -94,7 +96,7 @@ Pricing tiers. Every user belongs to exactly one group. The group's `percentage`
 **Indexes:**
 ```
 name        unique
-percentage  -1   (supports "highest percentage" queries for default group)
+percentage  -1   (supports highest eligible Group registration and fallback queries)
 ```
 
 ---
@@ -387,7 +389,7 @@ Manual funding requests submitted by customers and reviewed by admins.
 
 **State machine:** `PENDING → APPROVED` or `PENDING → REJECTED`. Both transitions are one-way.
 
-`referralCommissionEvaluation` is written inside the same approval transaction for newly approved deposits. It contains `version`, `outcome` (`CREATED`, `NOT_ELIGIBLE`, `DISABLED`), `reason`, `commissionId`, `referrerId`, `ratePercent`, `amountUsd`, and `evaluatedAt`. Legacy approved deposits may have no snapshot and are not retroactively commissioned.
+`referralCommissionEvaluation` is written inside the same approval transaction for newly approved deposits. It contains `version`, `outcome` (`CREATED`, `NOT_ELIGIBLE`, `DISABLED`), `reason`, `commissionId`, `referrerId`, `ratePercent`, `amountUsd`, and `evaluatedAt`. Phase 4C v2 evaluations also store account-currency `amount/currency`, `referrerExchangeRateFromUsd`, and `eligibilityWindowEndsAt`. Legacy approved deposits may have no snapshot and are not retroactively commissioned.
 
 **Indexes:**
 ```
@@ -415,7 +417,7 @@ Immutable commission record created when an eligible referred user's deposit is 
 | `sourceAmountUsd` | String | ✅ | Approved USD source amount |
 | `commissionRatePercent` | String | ✅ | Trusted backend config rate snapshot |
 | `commissionAmountUsd` | String | ✅ | `sourceAmountUsd * rate / 100`, rounded 2dp |
-| `commissionCurrency` | String | ✅ | `USD` |
+| `commissionCurrency` | String | ✅ | Referrer's account currency for new v2 records; legacy v1 rows may be `USD` |
 | `status` | String | ✅ | `AVAILABLE`, `LOCKED`, `PAID`, `CANCELLED`; new records are `AVAILABLE` |
 | `payoutRequestId` | ObjectId → ReferralPayoutRequest | ❌ | Set only while locked/paid through a payout request |
 | `availableAt` | Date | ✅ | Deposit approval timestamp |
@@ -438,6 +440,8 @@ payoutRequestId
 
 No referrer wallet credit happens during deposit approval. Phase 2E payout request and settlement transactions are the only current workflow that locks commissions or marks them `PAID`. There is no cancellation endpoint, commission amount editing, or retroactive backfill.
 
+**Phase 4C correction:** new commission records use calculation version `v2`. They retain `commissionAmountUsd` for USD analytics and additionally snapshot `referrerCurrency`, `referrerExchangeRateFromUsd`, payable `commissionAmount`, payable `commissionCurrency`, `calculatedAt`, and `eligibilityWindowEndsAt`. Eligibility lasts exactly 30 x 24 hours from `User.referredAt`; approvals at the exact end timestamp or later store a non-eligible evaluation reason such as `REFERRAL_WINDOW_EXPIRED`. Legacy `v1` USD-only rows remain readable and are not automatically converted.
+
 ---
 
 ## ReferralPayoutRequest
@@ -445,6 +449,8 @@ No referrer wallet credit happens during deposit approval. Phase 2E payout reque
 **Collection:** `referralpayoutrequests`
 
 Payout request created by a referrer for an exact immutable set of own `AVAILABLE` commissions.
+
+Phase 4C payouts are currency-aware. A payout may include only commissions with the same `commissionCurrency`. New payout rows store `amountUsd` for analytics plus payable `amount` and `currency`; `WALLET` settlement requires the payout currency to match the referrer's wallet/account currency, while `MANUAL` settlement records amount/currency and an external reference without wallet credit.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -517,7 +523,7 @@ status + submittedAt -1
 assignedGroupId + status
 ```
 
-State transitions are `PENDING -> APPROVED|REJECTED`, `APPROVED -> SUSPENDED`, and `SUSPENDED -> APPROVED`. Approval/rejection/suspension/reactivation update `ResellerApplication` and `User` together in a MongoDB transaction with bounded retry. Suspension moves the user to the explicit Default Group; reactivation restores the assigned reseller Group or an admin-selected replacement. No production index creation or legacy repair is implied by this documentation.
+State transitions are `PENDING -> APPROVED|REJECTED`, `APPROVED -> SUSPENDED`, and `SUSPENDED -> APPROVED`. Approval/rejection/suspension/reactivation update `ResellerApplication` and `User` together in a MongoDB transaction with bounded retry. Suspension restores the saved pre-reseller Group when valid, otherwise the highest eligible active non-deleted Group. Reactivation restores the assigned reseller Group or an admin-selected replacement. No production index creation or legacy repair is implied by this documentation.
 
 ---
 
@@ -534,6 +540,7 @@ Two-layer exchange rate system. Products are priced in USD internally; `platform
 | `symbol` | String | ✅ | e.g. `"﷼"` |
 | `marketRate` | Number | ❌ | Raw rate from external exchange API. 1 USD = N units |
 | `platformRate` | Number | ✅ | Admin-controlled rate used in all billing calculations |
+| `decimalPlaces` | Number | — | Destination-currency precision for commission and payout payable amounts. Integer `0..6`, default `2` |
 | `markupPercentage` | Number | — | Admin spread on top of market rate. Default `0` |
 | `isActive` | Boolean | — | Default `true` |
 | `lastUpdatedAt` | Date | ❌ | Last time rates were synced/updated |
@@ -541,6 +548,8 @@ Two-layer exchange rate system. Products are priced in USD internally; `platform
 **Virtuals:**
 - `effectiveRate` = `marketRate × (1 + markupPercentage/100)`
 - `spreadPercent` = `((platformRate - marketRate) / marketRate) × 100`
+
+Phase 4C closure verification added explicit currency precision. Account-currency commission amounts and payout payable amounts round with `Currency.decimalPlaces` using `ROUND_HALF_UP`; USD analytical snapshots remain independent two-decimal strings. Existing commission and payout snapshots are immutable and are not recalculated if an admin later changes a currency's precision.
 
 ---
 

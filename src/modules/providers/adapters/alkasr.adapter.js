@@ -50,9 +50,28 @@
 
 const axios = require('axios');
 const crypto = require('crypto');
-const { BaseProviderAdapter } = require('./base.adapter');
+const { BaseProviderAdapter, extractTargetId } = require('./base.adapter');
 
 const DEFAULT_TIMEOUT_MS = 180_000;
+
+const INTERNAL_PLACE_ORDER_KEYS = new Set([
+    'productId',
+    'externalProductId',
+    'providerProductId',
+    'amount',
+    'quantity',
+    'qty',
+    'referenceId',
+    'providerRequestId',
+    'idempotencyKey',
+    'orderUuid',
+    'order_uuid',
+    'providerOrderId',
+    'rawResponse',
+    'rawPayload',
+    'product',
+    'product_id',
+]);
 
 // ─── Status normaliser (Alkasr → internal canonical) ─────────────────────────
 
@@ -202,8 +221,16 @@ class AlkasrVipAdapter extends BaseProviderAdapter {
     async placeOrder(params) {
         const productId = params.productId ?? params.externalProductId;
         const amount = params.amount ?? params.quantity;
-        const playerId = params.playerId ?? '';
-        const orderUuid = crypto.randomUUID();
+        const playerId = extractTargetId(params);
+        const orderUuid = params.order_uuid ?? params.orderUuid ?? params.referenceId ?? crypto.randomUUID();
+        const dynamicParams = Object.fromEntries(
+            Object.entries(params).filter(([key, value]) => (
+                !INTERNAL_PLACE_ORDER_KEYS.has(key)
+                && value !== undefined
+                && value !== null
+                && String(value) !== ''
+            ))
+        );
 
         try {
             const { data } = await this._client.get(
@@ -211,6 +238,7 @@ class AlkasrVipAdapter extends BaseProviderAdapter {
                 {
                     params: {
                         qty: amount,
+                        ...dynamicParams,
                         playerId,
                         order_uuid: orderUuid,
                     },

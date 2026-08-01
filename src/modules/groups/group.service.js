@@ -156,8 +156,10 @@ const setDefaultGroup = async (groupId) => {
  * Throws BusinessRuleError (→ 422) when no active groups exist so that
  * the registration route returns a clear, actionable error.
  */
-const getHighestPercentageGroup = async () => {
-    const group = await Group.findOne({ isActive: true }).sort({ percentage: -1 }).limit(1);
+const getHighestPercentageGroup = async (options = {}) => {
+    const query = Group.findOne({ isActive: true, deletedAt: null }).sort({ percentage: -1, name: 1 }).limit(1);
+    if (options.session) query.session(options.session);
+    const group = await query;
     if (!group) {
         throw new BusinessRuleError(
             'No pricing groups are available. Please contact an administrator.',

@@ -284,19 +284,19 @@ describe('Phase 3A admin review workflow', () => {
         expect(String(freshUser.groupId)).toBe(String(group._id));
     });
 
-    test('suspension moves user to explicit Default Group and reactivation restores reseller group or replacement', async () => {
-        const defaultGroup = await createGroup({ name: 'Default', percentage: 8, isDefault: true });
+    test('suspension restores previous Group and reactivation restores reseller group or replacement', async () => {
+        const previousGroup = await createGroup({ name: 'Previous Group', percentage: 8, isDefault: true });
         const resellerGroup = await createGroup({ name: 'Reseller', percentage: 1 });
         const replacementGroup = await createGroup({ name: 'Replacement Reseller', percentage: 3 });
-        const customer = await createCustomer({ groupId: defaultGroup._id });
-        const admin = await createAdmin({ groupId: defaultGroup._id });
+        const customer = await createCustomer({ groupId: previousGroup._id });
+        const admin = await createAdmin({ groupId: previousGroup._id });
         const appDoc = await resellerService.submitApplication(customer._id, applicationPayload());
         const approved = await resellerService.approveApplication(appDoc._id, admin._id, { assignedGroupId: resellerGroup._id });
 
         await resellerService.suspendApplication(approved._id, admin._id, { suspensionReason: 'Paused commercial access.' });
         let freshUser = await User.findById(customer._id).lean();
         expect(freshUser.resellerStatus).toBe(RESELLER_STATUS.SUSPENDED);
-        expect(String(freshUser.groupId)).toBe(String(defaultGroup._id));
+        expect(String(freshUser.groupId)).toBe(String(previousGroup._id));
 
         await Group.updateOne({ _id: resellerGroup._id }, { $set: { isActive: false } });
         await expect(resellerService.reactivateApplication(approved._id, admin._id, {}))

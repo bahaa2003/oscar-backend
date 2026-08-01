@@ -220,8 +220,8 @@ describe('updateGroupPercentage', () => {
 // 13–15. AUTO-ASSIGN HIGHEST-PERCENTAGE GROUP ON REGISTRATION
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('Explicit default group on registration', () => {
-    it('assigns the explicit default group to a new user', async () => {
+describe('Highest eligible group on registration', () => {
+    it('assigns the highest active group to a new user even when another group is default', async () => {
         // Create two groups — registration must pick Gold (20 %)
         await groupService.createGroup({ name: 'Silver', percentage: 10, isDefault: true });
         await groupService.createGroup({ name: 'Gold', percentage: 20 });
@@ -234,24 +234,26 @@ describe('Explicit default group on registration', () => {
 
         // Fetch with groupId populated
         const dbUser = await User.findById(user._id).populate('groupId');
-        expect(dbUser.groupId.name).toBe('Silver');
-        expect(dbUser.groupId.percentage).toBe(10);
+        expect(dbUser.groupId.name).toBe('Gold');
+        expect(dbUser.groupId.percentage).toBe(20);
     });
 
-    it('does not assign the single existing group unless it is default', async () => {
+    it('assigns the single active group even when it is not default', async () => {
         await groupService.createGroup({ name: 'Only', percentage: 5 });
 
-        await expect(
-            register({
-                name: 'Lone User',
-                email: uniqueEmail(),
-                password: 'ValidPass@1',
-            })
-        ).rejects.toMatchObject({ code: 'DEFAULT_GROUP_NOT_CONFIGURED' });
+        const { user } = await register({
+            name: 'Lone User',
+            email: uniqueEmail(),
+            password: 'ValidPass@1',
+        });
+
+        const dbUser = await User.findById(user._id).populate('groupId');
+        expect(dbUser.groupId.name).toBe('Only');
+        expect(dbUser.groupId.percentage).toBe(5);
     });
 
-    it('selects the explicit default among three groups', async () => {
-        const g5 = await groupService.createGroup({ name: 'Tier5', percentage: 5, isDefault: true });
+    it('selects the highest eligible group among three groups', async () => {
+        await groupService.createGroup({ name: 'Tier5', percentage: 5, isDefault: true });
         await groupService.createGroup({ name: 'Tier30', percentage: 30 });
         await groupService.createGroup({ name: 'Tier15', percentage: 15 });
 
@@ -262,15 +264,17 @@ describe('Explicit default group on registration', () => {
         });
 
         const dbUser = await User.findById(user._id);
-        expect(dbUser.groupId.toString()).toBe(g5._id.toString());
+        const assignedGroup = await Group.findById(dbUser.groupId);
+        expect(assignedGroup.name).toBe('Tier30');
+        expect(assignedGroup.percentage).toBe(30);
     });
 
-    it('throws DEFAULT_GROUP_NOT_CONFIGURED when no default group exists', async () => {
+    it('throws NO_GROUPS_AVAILABLE when no eligible group exists', async () => {
         // No groups seeded — clearCollections ran in beforeEach
         await expect(
             register({ name: 'Ghost', email: uniqueEmail(), password: 'ValidPass@1' })
         ).rejects.toMatchObject({
-            code: 'DEFAULT_GROUP_NOT_CONFIGURED',
+            code: 'NO_GROUPS_AVAILABLE',
             statusCode: 422,
         });
 
@@ -285,7 +289,7 @@ describe('Explicit default group on registration', () => {
 
         await expect(
             register({ name: 'Ghost', email: uniqueEmail(), password: 'ValidPass@1' })
-        ).rejects.toMatchObject({ code: 'DEFAULT_GROUP_NOT_CONFIGURED' });
+        ).rejects.toMatchObject({ code: 'NO_GROUPS_AVAILABLE' });
     });
 });
 

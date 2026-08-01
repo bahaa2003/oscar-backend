@@ -233,6 +233,7 @@ const updateCurrencySchema = Joi.object({
     platformRate: Joi.number().positive().required().messages({
         'any.required': 'platformRate is required',
     }),
+    decimalPlaces: Joi.number().integer().min(0).max(6),
     markupPercentage: Joi.number().min(0).max(100),
     isActive: Joi.boolean(),
     applyDebtAdjustment: Joi.boolean().default(false),
@@ -253,6 +254,7 @@ const createCurrencySchema = Joi.object({
     platformRate: Joi.number().positive().required().messages({
         'any.required': 'platformRate is required',
     }),
+    decimalPlaces: Joi.number().integer().min(0).max(6).default(2),
     marketRate: Joi.number().positive().allow(null),
     markupPercentage: Joi.number().min(0).max(100).default(0),
     isActive: Joi.boolean().default(true),

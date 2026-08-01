@@ -34,6 +34,7 @@ const {
     notifyReferralPayoutPaid,
 } = require('../notifications/notification.service');
 const { Decimal } = require('../../shared/utils/decimalPrecision');
+const { getCurrencySnapshot } = require('../../services/currencyConverter.service');
 const { BusinessRuleError, NotFoundError } = require('../../shared/errors/AppError');
 
 const MAX_PAYOUT_TRANSACTION_ATTEMPTS = 3;
@@ -68,7 +69,9 @@ const toDecimalStrict = (value, code = 'INVALID_PAYOUT_AMOUNT') => {
     }
 };
 
-const toMoneyString = (value) => new Decimal(value).toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toFixed(2);
+const toMoneyString = (value, decimalPlaces = 2) => new Decimal(value)
+    .toDecimalPlaces(decimalPlaces, Decimal.ROUND_HALF_UP)
+    .toFixed(decimalPlaces);
 
 const normalizeObjectId = (value, resource = 'ObjectId') => {
     if (!mongoose.Types.ObjectId.isValid(value)) {
@@ -153,7 +156,25 @@ const sumCommissionAmounts = (commissions) => commissions.reduce(
     new Decimal(0)
 );
 
-const amountsEqual = (left, right) => toMoneyString(left) === toMoneyString(right);
+const getCommissionPayableAmount = (commission) => commission.commissionAmount || commission.commissionAmountUsd;
+
+const sumCommissionPayableAmounts = (commissions) => commissions.reduce(
+    (sum, commission) => sum.plus(toDecimalStrict(getCommissionPayableAmount(commission))),
+    new Decimal(0)
+);
+
+const getCommissionCurrencySet = (commissions) => new Set(
+    commissions.map((commission) => String(commission.commissionCurrency || PAYOUT_CURRENCY).trim().toUpperCase())
+);
+
+const amountsEqual = (left, right, decimalPlaces = 2) => (
+    toMoneyString(left, decimalPlaces) === toMoneyString(right, decimalPlaces)
+);
+
+const getCurrencyDecimalPlaces = async (currency, session = null) => {
+    const snapshot = await getCurrencySnapshot(currency || PAYOUT_CURRENCY, { session, bypassCache: Boolean(session) });
+    return snapshot.decimalPlaces;
+};
 
 const sortedStringIds = (ids = []) => ids.map((id) => String(id)).sort();
 
@@ -187,9 +208,17 @@ const classifyPayoutState = async (payout, session = null) => {
     const commissions = await getPayoutCommissions(payout, session);
     if (commissions.length !== payout.commissionIds.length) return `${payout.status}_WITH_MISSING_COMMISSION`;
     if (!exactIdSetMatches(commissions.map((item) => item._id), payout.commissionIds)) return 'COMMISSION_SET_MISMATCH';
+    const payoutCurrency = String(payout.currency || PAYOUT_CURRENCY).toUpperCase();
+    const payoutDecimalPlaces = await getCurrencyDecimalPlaces(payoutCurrency, session);
 
-    const total = sumCommissionAmounts(commissions);
-    if (!amountsEqual(total, payout.amountUsd)) return 'TOTAL_MISMATCH';
+    const totalUsd = sumCommissionAmounts(commissions);
+    if (!amountsEqual(totalUsd, payout.amountUsd)) return 'TOTAL_MISMATCH';
+    const totalPayable = sumCommissionPayableAmounts(commissions);
+    if (!amountsEqual(totalPayable, payout.amount || payout.amountUsd, payoutDecimalPlaces)) return 'TOTAL_MISMATCH';
+    const currencies = getCommissionCurrencySet(commissions);
+    if (currencies.size !== 1 || !currencies.has(payoutCurrency)) {
+        return 'CURRENCY_MISMATCH';
+    }
 
     if (payout.status === PAYOUT_STATUS.PENDING) {
         const healthy = commissions.every((commission) => (
@@ -228,7 +257,7 @@ const classifyPayoutState = async (payout, session = null) => {
         if (ledgers.length > 1) return 'PAID_WITH_DUPLICATE_WALLET_LEDGER';
         const [ledger] = ledgers;
         if (String(ledger._id) !== String(payout.walletTransactionId || '')) return 'PAID_WITH_MISMATCHED_WALLET_LEDGER';
-        if (!amountsEqual(ledger.amount, payout.amountUsd)) return 'TOTAL_MISMATCH';
+        if (!amountsEqual(ledger.amount, payout.amount || payout.amountUsd, payoutDecimalPlaces)) return 'TOTAL_MISMATCH';
         return 'HEALTHY_PAID_WALLET';
     }
 
@@ -254,6 +283,7 @@ const serializePayoutForUser = (payout) => ({
     status: payout.status,
     method: payout.method,
     amountUsd: payout.amountUsd,
+    amount: payout.amount || payout.amountUsd,
     currency: payout.currency,
     commissionCount: payout.requestSnapshot?.commissionCount || payout.commissionIds?.length || 0,
     requestedAt: payout.requestedAt || null,
@@ -304,6 +334,7 @@ const runPostCommitEffects = ({ type, payout, actorId, auditContext, walletTrans
         metadata: {
             referrerId: String(payout.referrerId),
             amountUsd: payout.amountUsd,
+            amount: payout.amount || payout.amountUsd,
             currency: payout.currency,
             method: payout.method,
             status: payout.status,
@@ -321,6 +352,7 @@ const runPostCommitEffects = ({ type, payout, actorId, auditContext, walletTrans
             metadata: {
                 payoutRequestId: String(payout._id),
                 amountUsd: payout.amountUsd,
+                amount: payout.amount || payout.amountUsd,
                 walletSourceIdentity: {
                     sourceType: TRANSACTION_SOURCE_TYPES.REFERRAL_PAYOUT,
                     sourceId: String(payout._id),
@@ -381,7 +413,7 @@ const createPayoutRequest = async (referrerId, { commissionIds, method }, auditC
                 return existing;
             }
 
-            const referrer = await User.findById(normalizedReferrerId).select('status deletedAt').session(session);
+            const referrer = await User.findById(normalizedReferrerId).select('status deletedAt currency').session(session);
             if (!referrer) throw new NotFoundError('User');
             if (referrer.status !== USER_STATUS.ACTIVE || referrer.deletedAt) {
                 throw new BusinessRuleError('Only active users can request referral payouts.', 'ACCOUNT_INACTIVE');
@@ -399,16 +431,22 @@ const createPayoutRequest = async (referrerId, { commissionIds, method }, auditC
                 if (commission.status !== COMMISSION_STATUS.AVAILABLE || commission.payoutRequestId) {
                     throw new BusinessRuleError('Selected commissions must be AVAILABLE and unlocked.', 'COMMISSION_NOT_AVAILABLE');
                 }
-                if (commission.commissionCurrency !== COMMISSION_CURRENCY) {
-                    throw new BusinessRuleError('Only USD referral commissions can be paid out.', 'INVALID_COMMISSION_CURRENCY');
-                }
             }
 
-            const total = sumCommissionAmounts(commissions).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
-            if (!total.greaterThan(0)) {
+            const currencies = getCommissionCurrencySet(commissions);
+            if (currencies.size !== 1) {
+                throw new BusinessRuleError('Selected commissions must share one payout currency.', 'MIXED_PAYOUT_CURRENCIES');
+            }
+
+            const [payoutCurrency] = [...currencies];
+            const payoutDecimalPlaces = await getCurrencyDecimalPlaces(payoutCurrency, session);
+            const totalUsd = sumCommissionAmounts(commissions).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+            const total = sumCommissionPayableAmounts(commissions)
+                .toDecimalPlaces(payoutDecimalPlaces, Decimal.ROUND_HALF_UP);
+            if (!total.greaterThan(0) || !totalUsd.greaterThan(0)) {
                 throw new BusinessRuleError('Payout total must be positive.', 'INVALID_PAYOUT_TOTAL');
             }
-            if (total.lessThan(getMinimumPayoutUsd())) {
+            if (totalUsd.lessThan(getMinimumPayoutUsd())) {
                 throw new BusinessRuleError('Payout total is below the configured minimum.', 'PAYOUT_BELOW_MINIMUM');
             }
 
@@ -418,16 +456,18 @@ const createPayoutRequest = async (referrerId, { commissionIds, method }, auditC
                 _id: payoutId,
                 referrerId: normalizedReferrerId,
                 commissionIds: objectIds,
-                amountUsd: total.toFixed(2),
-                currency: PAYOUT_CURRENCY,
+                amountUsd: totalUsd.toFixed(2),
+                amount: total.toFixed(payoutDecimalPlaces),
+                currency: payoutCurrency,
                 method: normalizedMethod,
                 status: PAYOUT_STATUS.PENDING,
                 idempotencyKey,
                 requestedAt: now,
                 requestSnapshot: {
                     commissionCount: objectIds.length,
-                    amountUsd: total.toFixed(2),
-                    currency: PAYOUT_CURRENCY,
+                    amountUsd: totalUsd.toFixed(2),
+                    amount: total.toFixed(payoutDecimalPlaces),
+                    currency: payoutCurrency,
                     commissionIds: objectIds,
                 },
             }], { session });
@@ -570,8 +610,15 @@ const rejectPayout = async (payoutId, adminId, { rejectionReason = null } = {}, 
 
             const commissions = await getPayoutCommissions(existing, session);
             if (commissions.length !== existing.commissionIds.length) throw makeReconciliationError('PENDING_WITH_MISSING_COMMISSION');
-            const total = sumCommissionAmounts(commissions);
-            if (!amountsEqual(total, existing.amountUsd)) throw makeReconciliationError('TOTAL_MISMATCH');
+            const totalUsd = sumCommissionAmounts(commissions);
+            const totalPayable = sumCommissionPayableAmounts(commissions);
+            const payoutDecimalPlaces = await getCurrencyDecimalPlaces(existing.currency || PAYOUT_CURRENCY, session);
+            if (
+                !amountsEqual(totalUsd, existing.amountUsd)
+                || !amountsEqual(totalPayable, existing.amount || existing.amountUsd, payoutDecimalPlaces)
+            ) {
+                throw makeReconciliationError('TOTAL_MISMATCH');
+            }
 
             const invalid = commissions.some((commission) => (
                 commission.status !== COMMISSION_STATUS.LOCKED
@@ -662,8 +709,15 @@ const settlePayout = async (payoutId, adminId, { externalReference = null, settl
 
             const commissions = await getPayoutCommissions(existing, session);
             if (commissions.length !== existing.commissionIds.length) throw makeReconciliationError('PENDING_WITH_MISSING_COMMISSION');
-            const total = sumCommissionAmounts(commissions);
-            if (!amountsEqual(total, existing.amountUsd)) throw makeReconciliationError('TOTAL_MISMATCH');
+            const totalUsd = sumCommissionAmounts(commissions);
+            const totalPayable = sumCommissionPayableAmounts(commissions);
+            const payoutDecimalPlaces = await getCurrencyDecimalPlaces(existing.currency || PAYOUT_CURRENCY, session);
+            if (
+                !amountsEqual(totalUsd, existing.amountUsd)
+                || !amountsEqual(totalPayable, existing.amount || existing.amountUsd, payoutDecimalPlaces)
+            ) {
+                throw makeReconciliationError('TOTAL_MISMATCH');
+            }
 
             const invalid = commissions.some((commission) => (
                 commission.status !== COMMISSION_STATUS.LOCKED
@@ -674,10 +728,17 @@ const settlePayout = async (payoutId, adminId, { externalReference = null, settl
 
             const now = new Date();
             if (existing.method === PAYOUT_METHOD.WALLET) {
+                const referrer = await User.findById(existing.referrerId).select('currency status deletedAt').session(session);
+                if (!referrer || referrer.status !== USER_STATUS.ACTIVE || referrer.deletedAt) {
+                    throw new BusinessRuleError('Payout referrer account is not active.', 'ACCOUNT_INACTIVE');
+                }
+                if (String(referrer.currency || '').toUpperCase() !== String(existing.currency || '').toUpperCase()) {
+                    throw new BusinessRuleError('Wallet payout currency does not match the referrer wallet currency.', 'PAYOUT_CURRENCY_RECONCILIATION_REQUIRED');
+                }
                 await runPayoutTestHook('beforeWalletSettlementCredit', { payoutId: existing._id });
                 const credit = await creditWalletDirect({
                     userId: existing.referrerId,
-                    amount: Number(existing.amountUsd),
+                    amount: Number(existing.amount || existing.amountUsd),
                     reference: existing._id,
                     description: `Referral payout #${existing._id.toString().slice(-6)}`,
                     session,

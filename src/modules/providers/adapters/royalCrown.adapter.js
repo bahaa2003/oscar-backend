@@ -43,7 +43,7 @@
  */
 
 const axios = require('axios');
-const { BaseProviderAdapter } = require('./base.adapter');
+const { BaseProviderAdapter, extractTargetId } = require('./base.adapter');
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 
@@ -183,7 +183,7 @@ class RoyalCrownAdapter extends BaseProviderAdapter {
     async placeOrder(params) {
         const productId = params.productId ?? params.externalProductId;
         const amount = params.amount ?? params.quantity;
-        const playerId = params.playerId ?? '';
+        const playerId = extractTargetId(params);
         const referenceId = params.referenceId ?? '';
 
         try {

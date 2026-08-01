@@ -37,9 +37,9 @@ describe('default group resolution', () => {
         expect(resolved.isDefault).toBe(true);
     });
 
-    it('does not use the highest percentage group for registration', async () => {
+    it('keeps explicit default resolution separate from highest Group registration', async () => {
         const defaultGroup = await groupService.createGroup({ name: 'Starter', percentage: 1, isDefault: true });
-        await groupService.createGroup({ name: 'Premium', percentage: 99 });
+        const highestGroup = await groupService.createGroup({ name: 'Premium', percentage: 99 });
 
         const { user } = await register({
             name: 'Registered',
@@ -48,7 +48,8 @@ describe('default group resolution', () => {
         });
 
         const dbUser = await User.findById(user._id);
-        expect(dbUser.groupId.toString()).toBe(defaultGroup._id.toString());
+        expect((await groupService.getDefaultGroup())._id.toString()).toBe(defaultGroup._id.toString());
+        expect(dbUser.groupId.toString()).toBe(highestGroup._id.toString());
     });
 
     it('fails clearly when no default group is configured', async () => {

@@ -11,7 +11,7 @@
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const { User, ROLES, USER_STATUS } = require('../modules/users/user.model');
-const { getDefaultGroup } = require('../modules/groups/group.service');
+const { getHighestPercentageGroup } = require('../modules/groups/group.service');
 const { createUserWithReferralCode } = require('../modules/referrals/referralCode.service');
 const {
     resolveRegistrationReferrer,
@@ -40,7 +40,7 @@ const verifyGoogleProfile = async (req, accessToken, refreshToken, profile, done
             return done(null, user);
         }
 
-        const group = await getDefaultGroup();
+        const group = await getHighestPercentageGroup();
         const referral = await resolveRegistrationReferrer({
             referrerCode: req?.googleOAuthContext?.referrerCode,
             email,
@@ -57,6 +57,8 @@ const verifyGoogleProfile = async (req, accessToken, refreshToken, profile, done
             groupId: group._id,
             status: USER_STATUS.ACTIVE,
             verified: true,
+            country: null,
+            currency: null,
             ...referralFields,
         }, { User });
 

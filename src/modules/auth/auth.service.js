@@ -27,7 +27,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
 const { User, ROLES, USER_STATUS } = require('../users/user.model');
-const { getDefaultGroup } = require('../groups/group.service');
+const { getHighestPercentageGroup } = require('../groups/group.service');
 const { createUserWithReferralCode } = require('../referrals/referralCode.service');
 const {
     resolveRegistrationReferrer,
@@ -51,6 +51,25 @@ const { USER_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.cons
 // ─── Private Helpers ──────────────────────────────────────────────────────────
 
 const TWO_FACTOR_OTP_EXPIRY_MS = 5 * 60 * 1000;
+
+const getMissingProfileFields = (user) => {
+    const missing = [];
+    if (!String(user?.country || '').trim()) missing.push('country');
+    if (!String(user?.currency || '').trim()) missing.push('currency');
+    return missing;
+};
+
+const decorateAuthUser = (user) => {
+    if (!user) return null;
+    const safe = typeof user.toSafeObject === 'function' ? user.toSafeObject() : user;
+    const missingProfileFields = getMissingProfileFields(safe);
+    const profileCompletionRequired = Boolean(safe.googleId) && missingProfileFields.length > 0;
+    return {
+        ...safe,
+        profileCompletionRequired,
+        missingProfileFields: profileCompletionRequired ? missingProfileFields : [],
+    };
+};
 
 /** Sign full-session JWT for a user. */
 const signToken = (userId, role) =>
@@ -111,7 +130,7 @@ const _safeCompareHash = (candidateHash, storedHash) => {
  *
  * Business rules:
  *  1. Email must be unique.
- *  2. Assigned to the explicit default pricing group.
+ *  2. Assigned to the highest eligible active pricing group.
  *  3. Status starts as ACTIVE — no admin approval required.
  *  4. verified = false — user must click email link before login is allowed.
  *  5. A verification email is dispatched (fire-and-forget safe).
@@ -131,7 +150,7 @@ const register = async ({ name, email, password, currency, country, phone, usern
     }
 
     // ── 2. Pricing group ──────────────────────────────────────────────────────
-    const group = await getDefaultGroup();
+    const group = await getHighestPercentageGroup();
     const referralAttribution = await resolveRegistrationReferrer({ referrerCode, email });
     const referralFields = referralAttribution.applied
         ? createEmailRegistrationAttributionFields(referralAttribution.referrer)
@@ -187,7 +206,7 @@ const register = async ({ name, email, password, currency, country, phone, usern
     });
 
     return {
-        user: user.toSafeObject(),
+        user: decorateAuthUser(user),
         referral: {
             applied: referralAttribution.applied,
             reason: referralAttribution.reason,
@@ -304,7 +323,7 @@ const login = async ({ email, password }) => {
         metadata: { email: user.email },
     });
 
-    return { token, user: user.toSafeObject() };
+    return { token, user: decorateAuthUser(user) };
 };
 
 // ─── verifyEmail ──────────────────────────────────────────────────────────────
@@ -400,7 +419,7 @@ const loginWithGoogle = (user) => {
         // Some frontends prefer a token even for pending users; adjust as needed.
         return {
             token: null,
-            user: user.toSafeObject(),
+            user: decorateAuthUser(user),
             message: 'Your account is awaiting admin approval. You will be notified once activated.',
         };
     }
@@ -422,7 +441,7 @@ const loginWithGoogle = (user) => {
         metadata: { email: user.email, method: 'google-oauth' },
     });
 
-    return { token, user: user.toSafeObject() };
+    return { token, user: decorateAuthUser(user) };
 };
 
 // ─── generate2FASecret ────────────────────────────────────────────────────────
@@ -437,7 +456,7 @@ const createGoogleOAuthHandoff = async (user, googleOAuthContext = {}) => {
     if (user.status === USER_STATUS.PENDING) {
         return {
             status: 'pending',
-            user: user.toSafeObject(),
+            user: decorateAuthUser(user),
             message: 'Your account is awaiting admin approval. You will be notified once activated.',
         };
     }
@@ -496,7 +515,7 @@ const exchangeGoogleOAuthCode = async ({ code, codeVerifier }) => {
         metadata: { email: user.email, method: 'google-oauth', handoffConsumed: true },
     });
 
-    return { token, user: user.toSafeObject() };
+    return { token, user: decorateAuthUser(user) };
 };
 
 const generate2FASecret = async (userId) => {
@@ -710,7 +729,7 @@ const verify2FA = async (tempToken, code) => {
         metadata: { email: user.email, twoFactorVerified: true },
     });
 
-    return { token: fullToken, user: user.toSafeObject() };
+    return { token: fullToken, user: decorateAuthUser(user) };
 };
 
 module.exports = {
@@ -725,4 +744,6 @@ module.exports = {
     enable2FA,
     disable2FA,
     verify2FA,
+    decorateAuthUser,
+    getMissingProfileFields,
 };

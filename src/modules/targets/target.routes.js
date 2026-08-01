@@ -4,6 +4,7 @@ const { Router } = require('express');
 const targetCtrl = require('./target.controller');
 const authenticate = require('../../shared/middlewares/authenticate');
 const requireActiveUser = require('../../shared/middlewares/requireActiveUser');
+const requireProfileComplete = require('../../shared/middlewares/requireProfileComplete');
 const { createUpload } = require('../../shared/middlewares/upload');
 const { validateBody, validateQuery, schemas } = require('./target.validation');
 
@@ -11,7 +12,7 @@ const targetUpload = createUpload('targets');
 
 const router = Router();
 
-router.use(authenticate, requireActiveUser);
+router.use(authenticate, requireActiveUser, requireProfileComplete);
 
 router.get('/apps', targetCtrl.getActiveTargetApps);
 
