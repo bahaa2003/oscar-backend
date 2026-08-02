@@ -39,6 +39,9 @@ const _findOrFail = async (id) => {
  * @param {string}  [opts.email]     - partial email search (case-insensitive)
  * @param {string}  [opts.search]    - partial name/email/username search
  * @param {string}  [opts.role]      - 'ADMIN' | 'CUSTOMER'
+ * @param {string}  [opts.groupId]   - group ObjectId
+ * @param {string}  [opts.currency]  - wallet currency
+ * @param {string}  [opts.balance]   - 'positive' | 'zero' | 'negative'
  * @param {Date}    [opts.from]      - createdAt >= from
  * @param {Date}    [opts.to]        - createdAt <= to
  * @param {number}  [opts.page]
@@ -52,6 +55,9 @@ const listUsers = async ({
     email,
     search,
     role,
+    groupId,
+    currency,
+    balance,
     from,
     to,
     page = 1,
@@ -65,15 +71,20 @@ const listUsers = async ({
     const requestedLimit = Number.isFinite(Number(limit)) && Number(limit) > 0
         ? Math.floor(Number(limit))
         : 20;
-    const normalizedLimit = Math.min(requestedLimit, 20); // strict max for admin users page
+    const normalizedLimit = Math.min(requestedLimit, 100);
     const skip = (normalizedPage - 1) * normalizedLimit;
     const normalizedSortBy = typeof sortBy === 'string' && sortBy.trim() ? sortBy.trim() : 'walletBalance';
     const normalizedSortOrder = String(sortOrder || '').trim().toLowerCase() === 'asc' ? 'asc' : 'desc';
 
-    const filter = { deletedAt: null, verified: true };
+    const filter = { deletedAt: null };
     if (status) filter.status = status;
     if (verified != null) filter.verified = verified;
     if (role) filter.role = role;
+    if (groupId) filter.groupId = groupId;
+    if (currency) filter.currency = String(currency).trim().toUpperCase();
+    if (balance === 'positive') filter.walletBalance = { $gt: 0 };
+    if (balance === 'zero') filter.walletBalance = 0;
+    if (balance === 'negative') filter.walletBalance = { $lt: 0 };
     if (email) filter.email = { $regex: email, $options: 'i' };
     if (search) {
         const term = String(search).trim();
@@ -92,8 +103,8 @@ const listUsers = async ({
     }
 
     const sort = normalizedSortBy === 'walletBalance'
-        ? { walletBalance: normalizedSortOrder === 'asc' ? 1 : -1 }
-        : { [normalizedSortBy]: normalizedSortOrder === 'asc' ? 1 : -1 };
+        ? { walletBalance: normalizedSortOrder === 'asc' ? 1 : -1, _id: 1 }
+        : { [normalizedSortBy]: normalizedSortOrder === 'asc' ? 1 : -1, _id: 1 };
 
     const [users, total] = await Promise.all([
         User.find(filter)
@@ -112,6 +123,7 @@ const listUsers = async ({
             limit: normalizedLimit,
             total,
             pages: Math.ceil(total / normalizedLimit),
+            totalPages: Math.ceil(total / normalizedLimit),
         },
     };
 };

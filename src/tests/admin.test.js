@@ -260,6 +260,57 @@ describe('[3] Admin Settings Service', () => {
         await seedDefaultSettings();
     });
 
+    it('paginates 45 matching customers with stable totals and no duplicates', async () => {
+        const group = await createGroup({ name: 'PaginationGroup', percentage: 0 });
+        const created = [];
+        for (let index = 0; index < 45; index += 1) {
+            created.push(await createCustomer({
+                groupId: group._id,
+                email: `pagination-${index}-${Date.now()}@test.com`,
+                walletBalance: 1000 - index,
+                verified: index % 2 === 0,
+            }));
+        }
+
+        const page1 = await adminUsersService.listUsers({ page: 1, limit: 20, role: 'CUSTOMER', sortBy: 'walletBalance', sortOrder: 'desc' });
+        const page2 = await adminUsersService.listUsers({ page: 2, limit: 20, role: 'CUSTOMER', sortBy: 'walletBalance', sortOrder: 'desc' });
+        const page3 = await adminUsersService.listUsers({ page: 3, limit: 20, role: 'CUSTOMER', sortBy: 'walletBalance', sortOrder: 'desc' });
+
+        expect(page1.users).toHaveLength(20);
+        expect(page2.users).toHaveLength(20);
+        expect(page3.users).toHaveLength(5);
+        expect(page1.pagination).toMatchObject({ page: 1, limit: 20, total: 45, pages: 3, totalPages: 3 });
+        expect(page2.pagination).toMatchObject({ page: 2, limit: 20, total: 45, pages: 3, totalPages: 3 });
+        expect(page3.pagination).toMatchObject({ page: 3, limit: 20, total: 45, pages: 3, totalPages: 3 });
+
+        const ids = [...page1.users, ...page2.users, ...page3.users].map((user) => user._id.toString());
+        expect(new Set(ids).size).toBe(45);
+        expect(ids.sort()).toEqual(created.map((user) => user._id.toString()).sort());
+    });
+
+    it('keeps search and status pagination totals aligned with the list query', async () => {
+        const group = await createGroup({ name: 'FilteredPaginationGroup', percentage: 0 });
+        for (let index = 0; index < 25; index += 1) {
+            await createCustomer({
+                groupId: group._id,
+                name: `Searchable User ${index}`,
+                email: `search-page-${index}-${Date.now()}@test.com`,
+                status: index < 22 ? USER_STATUS.ACTIVE : USER_STATUS.PENDING,
+            });
+        }
+
+        const searchPage = await adminUsersService.listUsers({ page: 2, limit: 10, role: 'CUSTOMER', search: 'Searchable' });
+        const activePage = await adminUsersService.listUsers({ page: 3, limit: 10, role: 'CUSTOMER', status: USER_STATUS.ACTIVE, search: 'Searchable' });
+        const beyondFinal = await adminUsersService.listUsers({ page: 4, limit: 10, role: 'CUSTOMER', search: 'Searchable' });
+
+        expect(searchPage.users).toHaveLength(10);
+        expect(searchPage.pagination).toMatchObject({ total: 25, pages: 3, totalPages: 3 });
+        expect(activePage.users).toHaveLength(2);
+        expect(activePage.pagination).toMatchObject({ total: 22, pages: 3, totalPages: 3 });
+        expect(beyondFinal.users).toHaveLength(0);
+        expect(beyondFinal.pagination).toMatchObject({ page: 4, total: 25, pages: 3, totalPages: 3 });
+    });
+
     it('listSettings returns all seeded settings', async () => {
         const settings = await adminSettingService.listSettings();
         expect(settings.length).toBeGreaterThanOrEqual(5);

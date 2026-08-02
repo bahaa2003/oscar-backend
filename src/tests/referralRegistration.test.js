@@ -282,4 +282,53 @@ describe('normal registration referral attribution', () => {
         });
         expect(await User.countDocuments({ email: inviter.email })).toBe(1);
     });
+
+    it('does not allow an established referral owner to be overwritten', async () => {
+        const group = await createDefaultGroup();
+        const originalInviter = await createCustomer({
+            groupId: group._id,
+            email: uniqueEmail('original-owner'),
+            referralCode: 'GHJKLMNPQR',
+        });
+        const newInviter = await createCustomer({
+            groupId: group._id,
+            email: uniqueEmail('new-owner'),
+            referralCode: 'HJKLMNPQRS',
+        });
+        const invitee = await createCustomer({
+            groupId: group._id,
+            email: uniqueEmail('already-owned'),
+            referredBy: originalInviter._id,
+            referredAt: new Date('2026-01-01T00:00:00.000Z'),
+            referralSource: REFERRAL_SOURCE.EMAIL_REGISTRATION,
+        });
+
+        const fresh = await User.findById(invitee._id).select('+referredBy +referredAt +referralSource');
+        fresh.referredBy = newInviter._id;
+        fresh.referredAt = new Date('2026-02-01T00:00:00.000Z');
+        fresh.referralSource = REFERRAL_SOURCE.GOOGLE_OAUTH;
+
+        await expect(fresh.save()).rejects.toThrow(/referredBy cannot be changed once assigned/);
+
+        const after = await findReferralFields(invitee._id);
+        expect(after.referredBy.toString()).toBe(originalInviter._id.toString());
+        expect(after.referralSource).toBe(REFERRAL_SOURCE.EMAIL_REGISTRATION);
+    });
+
+    it('does not create duplicate referral relationships for duplicate email registration attempts', async () => {
+        const group = await createDefaultGroup();
+        const inviter = await createCustomer({
+            groupId: group._id,
+            email: uniqueEmail('duplicate-owner'),
+            referralCode: 'JKLMNPQRST',
+        });
+        const email = uniqueEmail('duplicate-invitee');
+
+        await register(validRegistrationPayload({ email, referrerCode: inviter.referralCode }));
+        await expect(register(validRegistrationPayload({ email, referrerCode: inviter.referralCode })))
+            .rejects.toMatchObject({ code: 'CONFLICT' });
+
+        expect(await User.countDocuments({ email })).toBe(1);
+        expect(await User.countDocuments({ referredBy: inviter._id })).toBe(1);
+    });
 });

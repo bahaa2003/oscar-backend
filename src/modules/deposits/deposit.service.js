@@ -514,6 +514,20 @@ const classifyUnknownCommitResult = async (depositId) => {
     throw makeReconciliationError(classification);
 };
 
+const resolveApprovalAfterRetryExhaustion = async (depositId, retryError) => {
+    const deposit = await selectDepositForApproval(DepositRequest.findById(depositId));
+    if (!deposit) throw new NotFoundError('DepositRequest');
+
+    try {
+        return await resolveExistingApproval(deposit);
+    } catch (stateError) {
+        if (stateError?.code === 'DEPOSIT_APPROVAL_CONFLICT') {
+            throw retryError;
+        }
+        throw stateError;
+    }
+};
+
 const buildDepositApprovalSideEffects = ({
     previousDeposit,
     updatedDeposit,
@@ -1043,6 +1057,9 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     } catch (err) {
         if (hasMongoErrorLabel(err, 'UnknownTransactionCommitResult')) {
             transactionResult = await classifyUnknownCommitResult(depositId);
+        } else if (err?.code === 'DEPOSIT_APPROVAL_RETRY_EXHAUSTED') {
+            transactionResult = await resolveApprovalAfterRetryExhaustion(depositId, err);
+            postCommitSideEffects = null;
         } else if (isMongoDuplicateKeyError(err)) {
             const deposit = await selectDepositForApproval(DepositRequest.findById(depositId));
             if (!deposit) throw new NotFoundError('DepositRequest');

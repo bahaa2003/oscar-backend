@@ -107,6 +107,7 @@ const { Currency } = require('../currency/currency.model');
 const { getEntityAuditLogs, getActorAuditLogs } = require('../audit/audit.service');
 const depositSvc = require('../deposits/deposit.service');
 const referralPayoutCtrl = require('../referrals/referralPayout.admin.controller');
+const referralAdminDashboardCtrl = require('../referrals/referralAdminDashboard.controller');
 const resellerApplicationCtrl = require('../resellerApplications/resellerApplication.controller');
 const resellerApplicationValidation = require('../resellerApplications/resellerApplication.validation');
 const pricingCtrl = require('../pricing/pricing.controller');
@@ -430,6 +431,7 @@ router.post(
     resellerApplicationCtrl.reactivate
 );
 
+router.get('/referrals/dashboard', requirePermission('MANAGE_WALLET'), referralAdminDashboardCtrl.getDashboard);
 router.get('/referral-payouts', requirePermission('MANAGE_WALLET'), validateQuery(schemas.listReferralPayouts), referralPayoutCtrl.listPayouts);
 router.get('/referral-payouts/:id', requirePermission('MANAGE_WALLET'), referralPayoutCtrl.getPayout);
 router.post('/referral-payouts/:id/reject', requirePermission('MANAGE_WALLET'), validateBody(schemas.rejectReferralPayout), referralPayoutCtrl.rejectPayout);
