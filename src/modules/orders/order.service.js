@@ -280,6 +280,18 @@ const validateDynamicFieldsInput = (dynamicFields = [], submittedValues = {}) =>
     return { values: mappedValues, fieldsSnapshot };
 };
 
+const PLAYER_ID_FIELD_ALIASES = new Set([
+    'playerid',
+    'player_id',
+    'player',
+    'uid',
+    'userid',
+    'user_id',
+]);
+
+const normalizeOrderFieldAlias = (value) =>
+    String(value || '').trim().toLowerCase();
+
 const remapOrderFieldsInputByAliases = (orderFields = [], submittedValues = {}) => {
     const normalizedSubmitted = (
         submittedValues
@@ -289,14 +301,37 @@ const remapOrderFieldsInputByAliases = (orderFields = [], submittedValues = {}) 
         ? submittedValues
         : {};
 
+    const fields = Array.isArray(orderFields) ? orderFields : [];
+
+    // Expand Player-ID aliases only when this product has exactly one
+    // player-like field. This avoids collisions on products with multiple IDs.
+    const playerLikeFields = fields.filter((field) => {
+        const candidates = [
+            normalizeOrderFieldAlias(field?.key),
+            normalizeOrderFieldAlias(field?.id),
+        ];
+
+        return candidates.some((candidate) =>
+            PLAYER_ID_FIELD_ALIASES.has(candidate)
+        );
+    });
+
+    const singlePlayerField =
+        playerLikeFields.length === 1 ? playerLikeFields[0] : null;
+
     const aliasToKey = new Map();
-    for (const field of (Array.isArray(orderFields) ? orderFields : [])) {
+
+    for (const field of fields) {
         const canonicalKey = String(field?.key || '').trim();
         if (!canonicalKey) continue;
 
         const aliases = [field?.key, field?.label, field?.id]
-            .map((alias) => String(alias || '').trim().toLowerCase())
+            .map(normalizeOrderFieldAlias)
             .filter(Boolean);
+
+        if (singlePlayerField === field) {
+            aliases.push(...PLAYER_ID_FIELD_ALIASES);
+        }
 
         for (const alias of aliases) {
             if (!aliasToKey.has(alias)) {
@@ -306,8 +341,9 @@ const remapOrderFieldsInputByAliases = (orderFields = [], submittedValues = {}) 
     }
 
     const remapped = {};
+
     for (const [submittedKey, rawValue] of Object.entries(normalizedSubmitted)) {
-        const normalizedKey = String(submittedKey || '').trim().toLowerCase();
+        const normalizedKey = normalizeOrderFieldAlias(submittedKey);
         const canonicalKey = aliasToKey.get(normalizedKey) || submittedKey;
         remapped[canonicalKey] = rawValue;
     }

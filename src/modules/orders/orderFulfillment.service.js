@@ -275,6 +275,45 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         order.productId?.providerMapping ?? null
     );
 
+    // Provider adapters use `playerId` as the internal canonical contract.
+    // Admin/provider switching may expose the same customer value under
+    // playerId, player_id, player_Id, player, uid, userId, or user_id.
+    // Preserve providerMapping output, but provide canonical playerId as a
+    // compatibility fallback when the mapping did not already produce it.
+    const playerIdAliases = new Set([
+        'playerid',
+        'player_id',
+        'player',
+        'uid',
+        'userid',
+        'user_id',
+    ]);
+
+    let canonicalPlayerId;
+
+    for (const [key, value] of Object.entries(rawCustomerValues)) {
+        const normalizedKey = String(key || '').trim().toLowerCase();
+
+        if (
+            playerIdAliases.has(normalizedKey)
+            && value !== undefined
+            && value !== null
+            && String(value).trim() !== ''
+        ) {
+            canonicalPlayerId = value;
+            break;
+        }
+    }
+
+    if (
+        (mappedCustomerFields.playerId === undefined
+            || mappedCustomerFields.playerId === null
+            || String(mappedCustomerFields.playerId).trim() === '')
+        && canonicalPlayerId !== undefined
+    ) {
+        mappedCustomerFields.playerId = canonicalPlayerId;
+    }
+
     // ── Call the provider ──────────────────────────────────────────────────────
     console.log(`[Fulfillment] Placing order ${orderId} with provider…`);
 
