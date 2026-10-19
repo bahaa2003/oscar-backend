@@ -92,8 +92,8 @@ const listUsers = async ({
     }
 
     const sort = normalizedSortBy === 'walletBalance'
-        ? { walletBalance: normalizedSortOrder === 'asc' ? 1 : -1 }
-        : { [normalizedSortBy]: normalizedSortOrder === 'asc' ? 1 : -1 };
+        ? { walletBalance: normalizedSortOrder === 'asc' ? 1 : -1, _id: 1 }
+        : { [normalizedSortBy]: normalizedSortOrder === 'asc' ? 1 : -1, _id: 1 };
 
     const [users, total] = await Promise.all([
         User.find(filter)
