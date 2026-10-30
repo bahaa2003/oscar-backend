@@ -2,11 +2,14 @@
 
 const whatsappService = require('./whatsapp.service');
 const { sendSuccess } = require('../../shared/utils/apiResponse');
+const { Setting } = require('../admin/setting.model');
 
 const getStatus = async (_req, res) => {
+    const setting = await Setting.findOne({ key: 'adminNotificationWhatsApp' }).select('value').lean();
+    const adminNotificationNumber = String(setting?.value || process.env.ADMIN_NOTIFICATION_NUMBER || '').trim();
     sendSuccess(
         res,
-        whatsappService.getStatus(),
+        whatsappService.getStatus({ adminNotificationNumber }),
         'WhatsApp status retrieved'
     );
 };

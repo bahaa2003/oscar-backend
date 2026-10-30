@@ -3,6 +3,7 @@
 const fs = require('fs/promises');
 const path = require('path');
 const qrcode = require('qrcode');
+const { Setting } = require('../admin/setting.model');
 
 let Client = null;
 let LocalAuth = null;
@@ -92,8 +93,8 @@ const setLastError = (err) => {
         : null;
 };
 
-const normalizeAdminChatId = () => {
-    const rawNumber = String(process.env.ADMIN_NOTIFICATION_NUMBER || '').trim();
+const normalizeAdminChatId = (number = process.env.ADMIN_NOTIFICATION_NUMBER) => {
+    const rawNumber = String(number || '').trim();
     if (!rawNumber) return null;
 
     const normalized = rawNumber.replace(/[^\d]/g, '');
@@ -116,7 +117,7 @@ const getBrowserPid = (browser) => {
     }
 };
 
-const getStatus = () => {
+const getStatus = ({ adminNotificationNumber } = {}) => {
     const qrDataUrl = currentState === WHATSAPP_STATE.QR_READY ? currentQrDataUrl : null;
     const isReady = currentState === WHATSAPP_STATE.CONNECTED;
 
@@ -133,7 +134,7 @@ const getStatus = () => {
         lastError,
         lastConnectedAt,
         lastDisconnectedAt,
-        adminNumberConfigured: Boolean(normalizeAdminChatId()),
+        adminNumberConfigured: Boolean(normalizeAdminChatId(adminNotificationNumber)),
         dependencyAvailable: Boolean(Client && LocalAuth),
         autoReconnectEnabled: automaticReconnectEnabled,
     };
@@ -588,25 +589,42 @@ const destroyWhatsAppClient = async () => {
     await destroyCurrentClient({ logout: false });
 };
 
-const sendAdminNotification = async (message) => {
-    const chatId = normalizeAdminChatId();
-
-    if (!chatId) {
-        throw new Error('ADMIN_NOTIFICATION_NUMBER is not configured.');
+const normalizeRecipientChatId = (rawNumber) => {
+    let normalized = String(rawNumber || '').replace(/[^\d]/g, '');
+    if (normalized.startsWith('00')) normalized = normalized.slice(2);
+    if (normalized.startsWith('0') && normalized.length >= 10 && normalized.length <= 11) {
+        normalized = `20${normalized.slice(1)}`;
     }
+    return normalized.length >= 10 && normalized.length <= 15 ? `${normalized}@c.us` : null;
+};
 
+// Deliver an activation message to the phone stored on the exact payer account.
+const sendWhatsAppMessage = async (phone, message) => {
+    const chatId = normalizeRecipientChatId(phone);
+    if (!chatId) throw new Error('The paying administrator does not have a valid WhatsApp phone number.');
     if (!client || currentState !== WHATSAPP_STATE.CONNECTED) {
         throw new Error('WhatsApp client is not connected.');
     }
-
     const safeMessage = String(message || '').trim();
-    if (!safeMessage) {
-        throw new Error('WhatsApp notification message cannot be empty.');
-    }
-
+    if (!safeMessage) throw new Error('WhatsApp notification message cannot be empty.');
     return client.sendMessage(chatId, safeMessage);
 };
-
+const sendAdminNotification = async (message) => {
+    const stored = await Setting.findOne({ key: 'adminNotificationWhatsApp' }).select('value').lean();
+    const rawNumber = String(stored?.value || process.env.ADMIN_NOTIFICATION_NUMBER || '').trim();
+    let digits = rawNumber.replace(/[^\d]/g, '');
+    if (digits.startsWith('00')) digits = digits.slice(2);
+    if (digits.startsWith('0') && digits.length >= 10 && digits.length <= 11) digits = `20${digits.slice(1)}`;
+    if (!digits || digits.length < 10 || digits.length > 15) {
+        throw new Error('Admin notification WhatsApp number is not configured.');
+    }
+    if (!client || currentState !== WHATSAPP_STATE.CONNECTED) {
+        throw new Error('WhatsApp client is not connected.');
+    }
+    const safeMessage = String(message || '').trim();
+    if (!safeMessage) throw new Error('WhatsApp notification message cannot be empty.');
+    return client.sendMessage(`${digits}@c.us`, safeMessage);
+};
 module.exports = {
     WHATSAPP_STATE,
     AUTH_DATA_PATH,
@@ -621,4 +639,5 @@ module.exports = {
     clearLocalSession,
     getStatus,
     sendAdminNotification,
+    sendWhatsAppMessage,
 };

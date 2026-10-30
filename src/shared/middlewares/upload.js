@@ -19,6 +19,7 @@
  */
 
 const fs = require('fs');
+const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
 const multer = require('multer');
@@ -49,6 +50,46 @@ const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.sv
 /** Deposits also accept PDFs */
 const DEPOSIT_MIME_TYPES = new Set([...IMAGE_MIME_TYPES, 'application/pdf']);
 const DEPOSIT_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, '.pdf']);
+
+const readUploadedBytes = async (file) => {
+    if (Buffer.isBuffer(file?.buffer)) return file.buffer;
+    if (file?.path) return fsp.readFile(file.path);
+    return null;
+};
+
+const hasValidSignature = (buffer, mimeType) => {
+    if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;
+    if (mimeType === 'image/jpeg') {
+        return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    }
+    if (mimeType === 'image/png') {
+        return buffer.length >= 8 && buffer.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    }
+    if (mimeType === 'image/webp') {
+        return buffer.length >= 12
+            && buffer.slice(0, 4).toString('ascii') === 'RIFF'
+            && buffer.slice(8, 12).toString('ascii') === 'WEBP';
+    }
+    if (mimeType === 'application/pdf') {
+        return buffer.slice(0, 5).toString('ascii') === '%PDF-';
+    }
+    return false;
+};
+
+const validateUploadedFileSignature = async (file, {
+    allowPdf = false,
+    code = 'INVALID_FILE_TYPE',
+    message = 'Uploaded file content does not match its declared type.',
+} = {}) => {
+    const mimeType = String(file?.mimetype || '').toLowerCase();
+    const allowedMimes = allowPdf ? DEPOSIT_MIME_TYPES : IMAGE_MIME_TYPES;
+    if (!allowedMimes.has(mimeType)) {
+        throw new BusinessRuleError(message, code);
+    }
+    if (!hasValidSignature(await readUploadedBytes(file), mimeType)) {
+        throw new BusinessRuleError(message, code);
+    }
+};
 
 // ── Factory ───────────────────────────────────────────────────────────────────
 
@@ -114,3 +155,4 @@ const createUpload = (category) => {
 // Factory for creating category-specific uploaders
 module.exports = createUpload('deposits');   // backward-compatible default
 module.exports.createUpload = createUpload;
+module.exports.validateUploadedFileSignature = validateUploadedFileSignature;

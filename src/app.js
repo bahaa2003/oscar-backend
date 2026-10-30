@@ -14,6 +14,9 @@ const { apiLimiter } = require('./shared/middlewares/rateLimiter');
 
 // ── Module Routers ────────────────────────────────────────────────────────────
 const authRoutes = require('./modules/auth/auth.routes');
+const platformThemeRoutes = require('./modules/theme/platform.routes');
+const themeRoutes = require('./modules/theme/theme.routes');
+const themePaymentRoutes = require('./modules/theme/payment.routes');
 const userRoutes = require('./modules/users/user.routes');
 const groupRoutes = require('./modules/groups/group.routes');
 const productRoutes = require('./modules/products/product.routes');
@@ -202,6 +205,9 @@ app.get(`${API_PREFIX}/public/catalog`, async (req, res) => {
 
 // ── Admin Routes ──────────────────────────────────────────────────────────────
 app.use(`${API_PREFIX}/admin`, adminRoutes);
+app.use(`${API_PREFIX}/admin/theme`, platformThemeRoutes);
+app.use(`${API_PREFIX}/theme`, themeRoutes);
+app.use(`${API_PREFIX}/payments`, themePaymentRoutes);
 app.use(`${API_PREFIX}/admin`, adminCatalogRoutes);
 app.use(`${API_PREFIX}/admin/currencies`, currencyRoutes);
 app.use(`${API_PREFIX}/admin/whatsapp`, whatsappRoutes);
