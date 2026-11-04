@@ -85,6 +85,27 @@ test('admin wallet credit endpoint replays an idempotent request without crediti
     expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey })).toBe(1);
 });
 
+test('admin wallet credit treats a legacy null wallet reservation as unlocked', async () => {
+    const admin = await createAdmin();
+    const { customer } = await createCustomerWithGroup({ walletBalance: 25, currency: 'EGP' });
+    // Some legacy documents explicitly stored the optional field as BSON null.
+    await User.collection.updateOne({ _id: customer._id }, { $set: { activeWalletOperation: null } });
+
+    const response = await fetch(`${baseUrl}/api/admin/wallets/${customer._id}/add`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${jwt.sign({ id: String(admin._id) }, process.env.JWT_SECRET)}`,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': 'admin-credit-null-wallet-lock-001',
+        },
+        body: JSON.stringify({ amount: 800, reason: 'Legacy null lock regression', idempotencyKey: 'admin-credit-null-wallet-lock-001' }),
+    });
+
+    expect(response.status).toBe(201);
+    expect((await User.findById(customer._id)).walletBalance).toBe(825);
+    expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey: 'admin-credit-null-wallet-lock-001' })).toBe(1);
+});
+
 test('deposit recovery requires MANAGE_DEPOSITS and a valid incomplete guard resumes through HTTP', async () => {
     const { customer } = await createCustomerWithGroup({ walletBalance: 20 });
     const walletOnlySupervisor = await User.create({

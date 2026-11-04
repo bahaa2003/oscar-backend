@@ -212,7 +212,10 @@ const reserveWallet = async (operation, token, session = null) => {
     const filter = { _id: user._id, currency: expectedCurrency === 'USD' ? { $in: ['USD', null] } : expectedCurrency };
     if (operation.requireActiveUser) filter.status = 'ACTIVE';
     if (operation.expectedBalance != null) filter.walletBalance = operation.expectedBalance;
-    if (!active) filter.activeWalletOperation = { $exists: false };
+    // Older user documents may have the optional lock field explicitly stored
+    // as null. Treat that as unlocked as well as a missing field; `$exists:false`
+    // alone rejects those users with WALLET_OPERATION_LOCK_CONFLICT.
+    if (!active) filter.activeWalletOperation = null;
     else {
         filter['activeWalletOperation.operationKey'] = operation.idempotencyKey;
         filter['activeWalletOperation.leaseToken'] = active.leaseToken;
