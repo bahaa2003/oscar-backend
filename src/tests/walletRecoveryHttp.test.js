@@ -60,6 +60,31 @@ test('recovery issues endpoint authenticates and enforces MANAGE_WALLET over HTT
     expect((await request('/api/admin/wallet-operations/issues', admin)).status).toBe(200);
 });
 
+test('admin wallet credit endpoint replays an idempotent request without crediting twice', async () => {
+    const admin = await createAdmin();
+    const { customer } = await createCustomerWithGroup({ walletBalance: 20 });
+    const path = `/api/admin/wallets/${customer._id}/add`;
+    const idempotencyKey = 'admin-credit-http-retry-001';
+    const sendCredit = async (user) => {
+        const headers = { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey };
+        if (user) headers.Authorization = `Bearer ${jwt.sign({ id: String(user._id) }, process.env.JWT_SECRET)}`;
+        const response = await fetch(`${baseUrl}${path}`, {
+            method: 'POST', headers,
+            body: JSON.stringify({ amount: 5, reason: 'HTTP wallet credit verification', idempotencyKey }),
+        });
+        return { status: response.status, body: await response.json() };
+    };
+
+    expect((await sendCredit(null)).status).toBe(401);
+    expect((await sendCredit(customer)).status).toBe(403);
+    const first = await sendCredit(admin);
+    const retry = await sendCredit(admin);
+    expect(first.status).toBe(201);
+    expect(retry.status).toBe(201);
+    expect((await User.findById(customer._id)).walletBalance).toBe(25);
+    expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey })).toBe(1);
+});
+
 test('deposit recovery requires MANAGE_DEPOSITS and a valid incomplete guard resumes through HTTP', async () => {
     const { customer } = await createCustomerWithGroup({ walletBalance: 20 });
     const walletOnlySupervisor = await User.create({
