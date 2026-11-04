@@ -115,7 +115,12 @@ const addFunds = async (userId, amount, reason, adminId, idempotencyKey = null) 
     if (!user) throw new NotFoundError('User');
 
     const userCurrency = user.currency || 'USD';
-    const balanceBefore = safeRound(user.walletBalance || 0);
+    // Keep the exact stored snapshot for the atomic compare-and-set. The
+    // displayed/financial calculation still follows the existing 2-decimal
+    // wallet policy, but rounding this filter value can make legacy balances
+    // with extra decimal places fail the wallet reservation with 422.
+    const expectedBalance = Number(user.walletBalance || 0);
+    const balanceBefore = safeRound(expectedBalance);
     const creditUsedBefore = safeRound(user.creditUsed || 0);
 
     // If user has drawn credit (creditUsed > 0), adding funds repays credit first.
@@ -132,7 +137,7 @@ const addFunds = async (userId, amount, reason, adminId, idempotencyKey = null) 
         userId,
         idempotencyKey: stableAdminOperationKey(userId, 'ADD', parsedAmount, reason, balanceBefore, idempotencyKey),
         operationType: 'ADMIN_CREDIT', transactionType: TRANSACTION_TYPES.CREDIT,
-        amount: parsedAmount, delta: parsedAmount, targetBalance: balanceAfter, expectedBalance: balanceBefore,
+        amount: parsedAmount, delta: parsedAmount, targetBalance: balanceAfter, expectedBalance,
         creditUsedAfter, currency: userCurrency, description: reason || `Admin manual credit (${userCurrency})`,
         actorId: adminId, actorRole: ACTOR_ROLES.ADMIN, eventType: OUTBOX_EVENT.ADMIN,
         auditAction: require('../audit/audit.constants').WALLET_ACTIONS.ADMIN_BALANCE_ADJUSTMENT,
