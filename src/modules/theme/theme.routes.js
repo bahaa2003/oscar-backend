@@ -7,6 +7,9 @@ const service = require('./theme.service');
 
 const router = Router();
 // Consumers may only read the published platform appearance.
-router.get('/published', catchAsync(async (_req, res) => sendSuccess(res, await service.published())));
+router.get('/published', catchAsync(async (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    return sendSuccess(res, await service.published());
+}));
 
 module.exports = router;

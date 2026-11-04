@@ -75,6 +75,47 @@ test('light and dark chrome and storefront grid settings stay independent and pe
     expect(migrated.layout).toEqual({ productsPerRow: 4, categoriesPerRow: 3 });
 });
 
+test.each([2, 3, 4, 5, 6].flatMap((products) => [2, 3].map((categories) => [products, categories])))
+('layout %i products / %i categories survives HTTP draft, publish, public fetch and a fresh read', async (productsPerRow, categoriesPerRow) => {
+    const admin = await createAdmin();
+    const configuration = preset('classic');
+    configuration.layout = { productsPerRow, categoriesPerRow };
+    configuration.modes.light.colors.primary = '#1D4ED8';
+    const saved = await request('/api/admin/theme/draft', admin, 'POST', configuration);
+    expect(saved.status).toBe(200);
+    expect(saved.body.data.draft.layout).toEqual(configuration.layout);
+    const storedDraft = await ThemeSettings.findOne({ scopeKey: 'main' }).lean();
+    expect(storedDraft.draft.layout).toEqual(configuration.layout);
+    const published = await request('/api/admin/theme/publish', admin, 'POST', saved.body.data.draft);
+    expect(published.status).toBe(200);
+    expect(published.body.data.published.layout).toEqual(configuration.layout);
+    const stored = await ThemeSettings.findOne({ scopeKey: 'main' }).lean();
+    expect(stored.published.layout).toEqual(configuration.layout);
+    expect(stored.draft).toBeNull();
+    for (let read = 0; read < 2; read++) {
+        const response = await fetch(`${baseUrl}/api/theme/published`);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        const current = (await response.json()).data.published;
+        expect(current.layout).toEqual(configuration.layout);
+        expect(current.modes.light.colors.primary).toBe('#1D4ED8');
+    }
+    expect((await ThemeHistory.findOne({ scopeKey: 'main', version: 1 }).lean()).configuration.layout).toEqual(configuration.layout);
+});
+
+test('invalid layout writes cannot change a previously published layout', async () => {
+    const admin = await createAdmin();
+    const configuration = preset('classic');
+    await theme.publish(admin._id, configuration);
+    for (const layout of [{ productsPerRow: 7, categoriesPerRow: 3 }, { productsPerRow: '3', categoriesPerRow: 3 }, { productsPerRow: 3, categoriesPerRow: 4 }]) {
+        const invalid = { ...configuration, layout };
+        expect((await request('/api/admin/theme/draft', admin, 'POST', invalid)).status).toBe(400);
+        expect((await request('/api/admin/theme/publish', admin, 'POST', invalid)).status).toBe(400);
+    }
+    expect((await theme.published()).published.layout).toEqual(configuration.layout);
+    expect(await ThemeHistory.countDocuments({ scopeKey: 'main' })).toBe(1);
+});
+
 test('loading history into a draft does not publish another version', async () => {
     const admin = await createAdmin();
     await theme.publish(admin._id, preset('midnight'));

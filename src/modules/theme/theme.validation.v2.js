@@ -29,7 +29,7 @@ const palettes = {
 const colorKeys = ['primary','secondary','accent','background','surface','text','mutedText','border'];
 const allowed = {
     typography: { arabicFont: [...FREE_FONTS_AR, ...PRO_FONTS_AR], englishFont: [...FREE_FONTS_EN, ...PRO_FONTS_EN], baseSize: [14,16,18,20], headingWeight: [600,700,800] },
-    layout: { productsPerRow: [2, 3, 4], categoriesPerRow: [2, 3] },
+    layout: { productsPerRow: [2, 3, 4, 5, 6], categoriesPerRow: [2, 3] },
     buttons: { radius: [0,4,8,12,24], style: ['solid','outline'] },
     cards: { radius: [0,4,8,12,16,24], shadow: ['none','subtle','medium'] },
     navigation: { style: ['standard','compact'] },
@@ -141,7 +141,7 @@ function validateTheme(value) {
     const inputLayout = value.layout === undefined ? { productsPerRow: 4, categoriesPerRow: 3 } : value.layout;
     keysOnly(inputLayout, ['productsPerRow', 'categoriesPerRow'], 'layout');
     const layout = { productsPerRow: inputLayout.productsPerRow, categoriesPerRow: inputLayout.categoriesPerRow };
-    if (![2, 3, 4].includes(layout.productsPerRow) || ![2, 3].includes(layout.categoriesPerRow)) invalid('layout');
+    if (![2, 3, 4, 5, 6].includes(layout.productsPerRow) || ![2, 3].includes(layout.categoriesPerRow)) invalid('layout');
     const { logoPath,logoWidth,slides } = value.brand;
     const targetBannerPath = value.brand.targetBannerPath === undefined ? null : value.brand.targetBannerPath;
     const marqueeTextArabic = value.brand.marqueeTextArabic === undefined
