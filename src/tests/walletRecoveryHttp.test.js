@@ -62,7 +62,7 @@ test('recovery issues endpoint authenticates and enforces MANAGE_WALLET over HTT
 
 test('admin wallet credit endpoint replays an idempotent request without crediting twice', async () => {
     const admin = await createAdmin();
-    const { customer } = await createCustomerWithGroup({ walletBalance: 20 });
+    const { customer } = await createCustomerWithGroup({ walletBalance: -822.173, currency: 'EGP' });
     const path = `/api/admin/wallets/${customer._id}/add`;
     const idempotencyKey = 'admin-credit-http-retry-001';
     const sendCredit = async (user) => {
@@ -70,7 +70,7 @@ test('admin wallet credit endpoint replays an idempotent request without crediti
         if (user) headers.Authorization = `Bearer ${jwt.sign({ id: String(user._id) }, process.env.JWT_SECRET)}`;
         const response = await fetch(`${baseUrl}${path}`, {
             method: 'POST', headers,
-            body: JSON.stringify({ amount: 5, reason: 'HTTP wallet credit verification', idempotencyKey }),
+            body: JSON.stringify({ amount: 800, reason: 'HTTP wallet credit verification', idempotencyKey }),
         });
         return { status: response.status, body: await response.json() };
     };
@@ -81,7 +81,7 @@ test('admin wallet credit endpoint replays an idempotent request without crediti
     const retry = await sendCredit(admin);
     expect(first.status).toBe(201);
     expect(retry.status).toBe(201);
-    expect((await User.findById(customer._id)).walletBalance).toBe(25);
+    expect((await User.findById(customer._id)).walletBalance).toBe(-22.17);
     expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey })).toBe(1);
 });
 
