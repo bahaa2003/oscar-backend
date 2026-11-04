@@ -45,6 +45,7 @@
 const mongoose = require('mongoose');
 const { AuditLog, IMMUTABILITY_ERROR } = require('../modules/audit/audit.model');
 const { createAuditLog, getEntityAuditLogs, getActorAuditLogs, _sanitize } = require('../modules/audit/audit.service');
+const { processAuditOutboxBatch } = require('../modules/audit/auditOutbox.service');
 const {
     USER_ACTIONS,
     ORDER_ACTIONS,
@@ -366,7 +367,7 @@ describe('[4] Integration – Order creation', () => {
         product = await createProduct({ basePrice: 50 });
     });
 
-    it('successful createOrder produces ORDER_CREATED + WALLET_DEBIT logs', async () => {
+    it('successful createOrder produces ORDER_CREATED + WALLET_DEBIT audit events', async () => {
         const { order } = await orderService.createOrder({
             userId: customer._id,
             productId: product._id,
@@ -374,6 +375,7 @@ describe('[4] Integration – Order creation', () => {
         });
 
         await flushAudit();
+        await processAuditOutboxBatch({ limit: 20 });
 
         const orderLog = await AuditLog.findOne({ action: ORDER_ACTIONS.CREATED }).lean();
         const walletLog = await AuditLog.findOne({ action: WALLET_ACTIONS.DEBIT }).lean();
@@ -387,7 +389,7 @@ describe('[4] Integration – Order creation', () => {
         expect(walletLog).not.toBeNull();
         expect(walletLog.entityType).toBe(ENTITY_TYPES.WALLET);
         expect(walletLog.entityId.toString()).toBe(customer._id.toString());
-        expect(walletLog.metadata.chargedAmount).toBe(50);
+        expect(walletLog.metadata.amount).toBe(50);
     });
 
     it('failed createOrder (insufficient funds) produces ZERO audit logs', async () => {
@@ -416,7 +418,7 @@ describe('[4] Integration – Order creation', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('[5] Integration – Order refund', () => {
-    it('markOrderAsFailed creates ORDER_REFUNDED + WALLET_CREDIT logs', async () => {
+    it('markOrderAsFailed creates ORDER_REFUNDED + WALLET_REFUND logs', async () => {
         const group = await createGroup({ name: 'Standard', percentage: 0 });
         const customer = await createCustomer({ groupId: group._id, walletBalance: 500 });
         const product = await createProduct({ basePrice: 100 });
@@ -432,13 +434,14 @@ describe('[5] Integration – Order refund', () => {
 
         await orderService.markOrderAsFailed(order._id);
         await flushAudit();
+        await processAuditOutboxBatch({ limit: 20 });
 
         const refundLog = await AuditLog.findOne({ action: ORDER_ACTIONS.REFUNDED }).lean();
-        const creditLog = await AuditLog.findOne({ action: WALLET_ACTIONS.CREDIT }).lean();
+        const creditLog = await AuditLog.findOne({ action: WALLET_ACTIONS.REFUND }).lean();
 
         expect(refundLog).not.toBeNull();
         expect(refundLog.entityId.toString()).toBe(order._id.toString());
-        expect(refundLog.metadata.totalRefunded).toBe(100);
+        expect(refundLog.metadata.totalRefund).toBe(100);
 
         expect(creditLog).not.toBeNull();
         expect(creditLog.entityId.toString()).toBe(customer._id.toString());
@@ -505,7 +508,7 @@ describe('[6] Integration – Auth events', () => {
 
         // Mark as email-verified so the PENDING status gate is reached
         // (this test is specifically about the admin-approval blocked path)
-        await User.findOneAndUpdate({ email }, { verified: true });
+        await User.findOneAndUpdate({ email }, { verified: true, status: USER_STATUS.PENDING });
 
         await flushAudit();
         await AuditLog.collection.deleteMany({});  // isolate

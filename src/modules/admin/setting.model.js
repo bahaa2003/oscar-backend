@@ -52,7 +52,7 @@ const Setting = mongoose.model('Setting', settingSchema);
 const DEFAULT_SETTINGS = [
     { key: 'orderTimeoutMinutes', value: 30, description: 'Minutes before a PROCESSING order is auto-failed' },
     { key: 'providerRetryLimit', value: 5, description: 'Max polling attempts before an order is forced FAILED' },
-    { key: 'maintenanceMode', value: false, description: 'When true, new orders are blocked platform-wide' },
+    { key: 'maintenanceMode', value: false, description: 'When true, the public storefront and customer API are temporarily unavailable' },
     { key: 'maxWalletAdjustment', value: 10000, description: 'Maximum single manual wallet adjustment (admin)' },
     { key: 'defaultPaginationLimit', value: 20, description: 'Default page size for list endpoints' },
     { key: 'paymentGroups', value: [], description: 'Dynamic payment methods grouped by category' },

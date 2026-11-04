@@ -183,6 +183,7 @@ const updateOrderStatusSchema = Joi.object({
 // ─── Wallet schemas ───────────────────────────────────────────────────────────
 
 const walletAdjustmentSchema = Joi.object({
+    idempotencyKey: Joi.string().trim().min(8).max(128).optional(),
     amount: Joi.number().positive().max(100_000).required().messages({
         'number.max': 'Maximum single adjustment is 100,000',
         'number.positive': 'Amount must be a positive number',
@@ -197,6 +198,7 @@ const walletAdjustmentSchema = Joi.object({
 }).or('reason', 'description');
 
 const walletSetBalanceSchema = Joi.object({
+    idempotencyKey: Joi.string().trim().min(8).max(128).optional(),
     targetBalance: Joi.number().required().messages({
         'any.required': 'Target balance is required',
     }),
@@ -297,6 +299,7 @@ const approveDepositSchema = Joi.object({
 // ─── Debt Adjustment schema ──────────────────────────────────────────────────
 
 const debtAdjustmentSchema = Joi.object({
+    idempotencyKey: Joi.string().trim().min(8).max(128).optional(),
     percentage: Joi.number().positive().max(100).required().messages({
         'number.positive': 'Percentage must be a positive number',
         'number.max': 'Percentage cannot exceed 100',

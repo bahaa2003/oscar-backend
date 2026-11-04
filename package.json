@@ -8,7 +8,7 @@
     "dev": "nodemon src/server.js",
     "seed": "node src/scripts/seed.js",
     "seed:clear": "node src/scripts/seed.js --clear",
-    "test": "jest --runInBand --forceExit"
+    "test": "jest --runInBand"
   },
   "keywords": [
     "digital-products",

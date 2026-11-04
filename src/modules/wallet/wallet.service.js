@@ -3,6 +3,24 @@
 const { User, USER_STATUS } = require('../users/user.model');
 const { WalletTransaction, TRANSACTION_TYPES } = require('./walletTransaction.model');
 const { NotFoundError, BusinessRuleError, InsufficientFundsError } = require('../../shared/errors/AppError');
+const { Decimal } = require('../../shared/utils/decimalPrecision');
+const crypto = require('crypto');
+const { executeWalletOperation, OUTBOX_EVENT } = require('./walletOperation.service');
+const { ACTOR_ROLES } = require('../audit/audit.constants');
+const { makeAuditEvent, enqueueAuditEvents } = require('../audit/auditOutbox.service');
+
+const noActiveWalletOperation = { activeWalletOperation: { $exists: false } };
+const activeWalletOperationConflict = () => new BusinessRuleError(
+    'Another wallet operation is being recovered. Retry after it completes.',
+    'WALLET_OPERATION_PENDING'
+);
+
+const throwIfWalletOperationPending = async (userId, session) => {
+    let query = User.findById(userId).select('+activeWalletOperation');
+    if (session) query = query.session(session);
+    const user = await query;
+    if (user?.activeWalletOperation) throw activeWalletOperationConflict();
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL HELPER
@@ -23,6 +41,7 @@ const _createTransactionRecord = async ({
     reference,
     description,
     session,
+    idempotencyKey,
 }) => {
     const doc = {
         userId,
@@ -33,13 +52,27 @@ const _createTransactionRecord = async ({
         reference,
         status: 'COMPLETED',
         description,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
     };
 
     if (session) {
         const [txn] = await WalletTransaction.create([doc], { session });
+        if (idempotencyKey) await enqueueAuditEvents([makeAuditEvent({
+            eventId: `${idempotencyKey}:audit:WALLET_CREDIT`, eventType: 'WALLET_CREDIT',
+            actorId: userId, actorRole: ACTOR_ROLES.SYSTEM, action: 'WALLET_CREDIT',
+            entityType: 'WALLET', entityId: userId,
+            metadata: { idempotencyKey, transactionId: txn._id, amount, balanceBefore, balanceAfter, reason: description },
+        })], { session });
         return txn;
     }
-    return WalletTransaction.create(doc);
+    const txn = await WalletTransaction.create(doc);
+    if (idempotencyKey) await enqueueAuditEvents([makeAuditEvent({
+        eventId: `${idempotencyKey}:audit:WALLET_CREDIT`, eventType: 'WALLET_CREDIT',
+        actorId: userId, actorRole: ACTOR_ROLES.SYSTEM, action: 'WALLET_CREDIT',
+        entityType: 'WALLET', entityId: userId,
+        metadata: { idempotencyKey, transactionId: txn._id, amount, balanceBefore, balanceAfter, reason: description },
+    })]);
+    return txn;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,60 +102,40 @@ const _createTransactionRecord = async ({
  *
  * @returns {{ walletDeducted: number, creditUsedAmount: number, transaction: WalletTransaction }}
  */
-const debitWalletAtomic = async ({ userId, amount, reference = null, description = '', session }) => {
+const debitWalletAtomic = async ({ userId, amount, reference = null, description = '', session, idempotencyKey, actorId, actorRole }) => {
     if (amount <= 0) {
         throw new BusinessRuleError('Debit amount must be greater than zero.', 'INVALID_AMOUNT');
     }
 
-    const opts = session ? { new: false, session } : { new: false };
-
-    // ── Atomic CAS: matches when user is ACTIVE and (walletBalance + creditLimit) >= amount ──
-    const oldUser = await User.findOneAndUpdate(
-        {
-            _id: userId,
-            status: USER_STATUS.ACTIVE,
-            $expr: {
-                $gte: [
-                    { $add: ['$walletBalance', { $ifNull: ['$creditLimit', 0] }] },
-                    amount,
-                ],
-            },
-        },
-        [{ $set: { walletBalance: { $subtract: ['$walletBalance', amount] } } }],
-        opts
-    );
-
-    if (!oldUser) {
-        const user = session
-            ? await User.findById(userId).session(session)
-            : await User.findById(userId);
-        if (!user) throw new NotFoundError('User');
-        if (user.status !== USER_STATUS.ACTIVE) {
-            throw new BusinessRuleError('User account is not active.', 'ACCOUNT_INACTIVE');
-        }
-        // Balance + credit limit is insufficient
-        const available = (user.walletBalance || 0) + (user.creditLimit || 0);
-        throw new InsufficientFundsError(amount, available);
-    }
-
-    // Calculate how much was drawn from wallet vs credit
-    const oldBalance = Number(oldUser.walletBalance) || 0;
-    const newBalance = Number((oldBalance - amount).toFixed(2));
+    const wallet = await User.findById(userId).select('currency status');
+    if (!wallet) throw new NotFoundError('User');
+    if (wallet.status !== USER_STATUS.ACTIVE) throw new BusinessRuleError('User account is not active.', 'ACCOUNT_INACTIVE');
+    const key = idempotencyKey || (reference ? `wallet:debit:${reference}` : `wallet:debit:${crypto.randomUUID()}`);
+    const result = await executeWalletOperation({
+        userId,
+        idempotencyKey: key,
+        operationType: 'PURCHASE_DEBIT',
+        transactionType: TRANSACTION_TYPES.DEBIT,
+        amount,
+        delta: -amount,
+        currency: wallet.currency || 'USD',
+        reference,
+        description,
+        session,
+        enforceAvailable: true,
+        requireActiveUser: true,
+        creditUsedMode: 'DEBIT',
+        actorId: actorId || userId,
+        actorRole: actorRole || ACTOR_ROLES.CUSTOMER,
+        eventType: OUTBOX_EVENT.DEBIT,
+    });
+    const transaction = result.transaction;
+    const oldBalance = Number(transaction.balanceBefore) || 0;
+    const newBalance = Number(transaction.balanceAfter) || 0;
     const walletPortion = Math.min(amount, Math.max(0, oldBalance)); // actual wallet funds used
     const creditPortion = amount - walletPortion; // remainder came from credit line
 
     // ── Immutable wallet transaction record ───────────────────────────────────
-    const transaction = await _createTransactionRecord({
-        userId,
-        type: TRANSACTION_TYPES.DEBIT,
-        amount,
-        balanceBefore: oldBalance,
-        balanceAfter: newBalance,
-        reference,
-        description,
-        session,
-    });
-
     return { walletDeducted: amount, creditUsedAmount: creditPortion, transaction };
 };
 
@@ -145,35 +158,31 @@ const debitWalletAtomic = async ({ userId, amount, reference = null, description
  * @param {ClientSession}   [params.session]
  * @returns {{ transaction: WalletTransaction }}
  */
-const forcedDebitWallet = async ({ userId, amount, reference = null, description = '', session }) => {
+const forcedDebitWallet = async ({ userId, amount, reference = null, description = '', session, idempotencyKey, actorId, actorRole }) => {
     if (amount <= 0) {
         throw new BusinessRuleError('Debit amount must be greater than zero.', 'INVALID_AMOUNT');
     }
 
     const user = session
-        ? await User.findById(userId).session(session)
-        : await User.findById(userId);
+        ? await User.findById(userId).select('currency +activeWalletOperation').session(session)
+        : await User.findById(userId).select('currency +activeWalletOperation');
     if (!user) throw new NotFoundError('User');
-
-    const balanceBefore = Number(user.walletBalance) || 0;
-    const balanceAfter  = parseFloat((balanceBefore - amount).toFixed(2));
-
-    // $inc is unconditional — works even when balance is already negative
-    const updateOpts = session ? { session } : {};
-    await User.updateOne({ _id: userId }, { $inc: { walletBalance: -amount } }, updateOpts);
-
-    const transaction = await _createTransactionRecord({
+    const result = await executeWalletOperation({
         userId,
-        type: TRANSACTION_TYPES.DEBIT,
+        idempotencyKey: idempotencyKey || (reference ? `wallet:forced-debit:${reference}` : `wallet:forced-debit:${crypto.randomUUID()}`),
+        operationType: 'FORCED_DEBIT',
+        transactionType: TRANSACTION_TYPES.DEBIT,
         amount,
-        balanceBefore,
-        balanceAfter,
+        delta: -amount,
+        currency: user.currency || 'USD',
         reference,
         description,
         session,
+        actorId: actorId || userId,
+        actorRole: actorRole || ACTOR_ROLES.SYSTEM,
+        eventType: OUTBOX_EVENT.DEBIT,
     });
-
-    return { transaction };
+    return { transaction: result.transaction };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -191,45 +200,39 @@ const refundWalletAtomic = async ({
     reference,
     description = '',
     session,
+    idempotencyKey,
+    actorId,
+    actorRole,
+    auditEvents,
 }) => {
     const totalRefund = parseFloat((walletDeducted + creditUsedAmount).toFixed(2));
     if (totalRefund <= 0) {
         throw new BusinessRuleError('Refund amount must be greater than zero.', 'INVALID_AMOUNT');
     }
 
-    const opts = session ? { new: false, session } : { new: false };
-
-    const oldUser = await User.findOneAndUpdate(
-        { _id: userId },
-        [
-            {
-                $set: {
-                    walletBalance: { $add: ['$walletBalance', walletDeducted] },
-                    creditUsed: {
-                        $max: [0, { $subtract: ['$creditUsed', creditUsedAmount] }],
-                    },
-                },
-            },
-        ],
-        opts
-    );
-
-    if (!oldUser) throw new NotFoundError('User');
-
-    const oldBal = Number(oldUser.walletBalance) || 0;
-
-    const transaction = await _createTransactionRecord({
+    const user = session
+        ? await User.findById(userId).select('currency +activeWalletOperation').session(session)
+        : await User.findById(userId).select('currency +activeWalletOperation');
+    if (!user) throw new NotFoundError('User');
+    const result = await executeWalletOperation({
         userId,
-        type: TRANSACTION_TYPES.REFUND,
-        amount: walletDeducted,
-        balanceBefore: oldBal,
-        balanceAfter: Number((oldBal + walletDeducted).toFixed(2)),
+        idempotencyKey: idempotencyKey || (reference ? `wallet:refund:${reference}` : `wallet:refund:${crypto.randomUUID()}`),
+        operationType: 'REFUND',
+        transactionType: TRANSACTION_TYPES.REFUND,
+        amount: walletDeducted > 0 ? walletDeducted : totalRefund,
+        delta: walletDeducted,
+        currency: user.currency || 'USD',
+        creditUsedMode: 'REFUND',
+        creditUsedAmount,
         reference,
         description,
         session,
+        actorId: actorId || userId,
+        actorRole: actorRole || ACTOR_ROLES.SYSTEM,
+        eventType: OUTBOX_EVENT.REFUND,
+        auditEvents,
     });
-
-    return { transaction };
+    return { transaction: result.transaction };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -240,20 +243,78 @@ const refundWalletAtomic = async ({
  * Atomically credit a flat amount directly to a user's walletBalance.
  * Session is optional — works on standalone MongoDB instances.
  */
-const creditWalletDirect = async ({ userId, amount, reference = null, description = '', session }) => {
+const creditWalletDirect = async ({ userId, amount, reference = null, description = '', session, idempotencyKey, expectedCurrency, activeOperationKey, activeOperationLeaseToken }) => {
     if (amount <= 0) {
         throw new BusinessRuleError('Credit amount must be greater than zero.', 'INVALID_AMOUNT');
     }
 
+    if (!activeOperationKey) {
+        const user = session
+            ? await User.findById(userId).select('currency').session(session)
+            : await User.findById(userId).select('currency');
+        if (!user) throw new NotFoundError('User');
+        const result = await executeWalletOperation({
+            userId,
+            idempotencyKey: idempotencyKey || (reference ? `wallet:credit:${reference}` : `wallet:credit:${crypto.randomUUID()}`),
+            operationType: 'DIRECT_CREDIT',
+            transactionType: TRANSACTION_TYPES.CREDIT,
+            amount,
+            delta: amount,
+            currency: expectedCurrency || user.currency || 'USD',
+            reference,
+            description,
+            session,
+            actorId: userId,
+            actorRole: ACTOR_ROLES.SYSTEM,
+            eventType: OUTBOX_EVENT.CREDIT,
+        });
+        return { transaction: result.transaction };
+    }
+
     const opts = session ? { new: false, session } : { new: false };
 
+    const filter = { _id: userId };
+    if (expectedCurrency) {
+        filter.currency = expectedCurrency === 'USD' ? { $in: ['USD', null] } : expectedCurrency;
+    }
+    if (activeOperationKey) {
+        filter['activeWalletOperation.operationKey'] = activeOperationKey;
+        filter['activeWalletOperation.leaseToken'] = activeOperationLeaseToken;
+        filter['activeWalletOperation.status'] = 'PREPARED';
+    } else {
+        filter.activeWalletOperation = { $exists: false };
+    }
+    const updatePipeline = [{
+        $set: {
+            walletBalance: { $round: [{ $add: [{ $ifNull: ['$walletBalance', 0] }, amount] }, 2] },
+            ...(activeOperationKey ? {
+                'activeWalletOperation.status': 'APPLIED',
+                'activeWalletOperation.balanceBefore': { $ifNull: ['$walletBalance', 0] },
+                'activeWalletOperation.balanceAfter': { $round: [{ $add: [{ $ifNull: ['$walletBalance', 0] }, amount] }, 2] },
+            } : {}),
+        },
+    }];
     const oldUser = await User.findOneAndUpdate(
-        { _id: userId },
-        [{ $set: { walletBalance: { $add: ['$walletBalance', amount] } } }],
+        filter,
+        updatePipeline,
         opts
     );
 
-    if (!oldUser) throw new NotFoundError('User');
+    if (!oldUser) {
+        const user = session
+            ? await User.findById(userId).select('+activeWalletOperation').session(session)
+            : await User.findById(userId).select('+activeWalletOperation');
+        if (!user) throw new NotFoundError('User');
+        if (expectedCurrency && String(user.currency || 'USD').toUpperCase() !== expectedCurrency) {
+            throw new BusinessRuleError('Wallet currency changed during deposit approval.', 'WALLET_CURRENCY_CHANGED');
+        }
+        if (activeOperationKey && (user.activeWalletOperation?.operationKey !== activeOperationKey
+            || user.activeWalletOperation?.leaseToken !== activeOperationLeaseToken)) {
+            throw activeWalletOperationConflict();
+        }
+        if (!activeOperationKey && user.activeWalletOperation) throw activeWalletOperationConflict();
+        throw new NotFoundError('User');
+    }
 
     const oldBal = Number(oldUser.walletBalance) || 0;
 
@@ -262,10 +323,11 @@ const creditWalletDirect = async ({ userId, amount, reference = null, descriptio
         type: TRANSACTION_TYPES.CREDIT,
         amount,
         balanceBefore: oldBal,
-        balanceAfter: Number((oldBal + amount).toFixed(2)),
+        balanceAfter: new Decimal(oldBal).plus(amount).toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toNumber(),
         reference,
         description,
         session,
+        idempotencyKey,
     });
 
     return { transaction };
@@ -301,4 +363,12 @@ const getTransactionHistory = async (userId, { page = 1, limit = 20 } = {}) => {
     };
 };
 
-module.exports = { debitWalletAtomic, forcedDebitWallet, refundWalletAtomic, creditWalletDirect, getTransactionHistory };
+module.exports = {
+    debitWalletAtomic,
+    forcedDebitWallet,
+    refundWalletAtomic,
+    creditWalletDirect,
+    getTransactionHistory,
+    noActiveWalletOperation,
+    activeWalletOperationConflict,
+};

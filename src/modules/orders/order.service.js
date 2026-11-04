@@ -17,7 +17,6 @@ const {
 const { createAuditLog } = require('../audit/audit.service');
 const {
     ORDER_ACTIONS,
-    WALLET_ACTIONS,
     PROVIDER_ACTIONS,
     ADMIN_ACTIONS,
     ENTITY_TYPES,
@@ -989,22 +988,6 @@ const _attemptCreateOrder = async (
             },
         });
 
-        createAuditLog({
-            actorId, actorRole, ipAddress, userAgent,
-            action: WALLET_ACTIONS.DEBIT,
-            entityType: ENTITY_TYPES.WALLET,
-            entityId: userId,
-            metadata: {
-                orderId: order._id,
-                usdAmount: usdTotalPrice,
-                currency: userCurrency,
-                rateSnapshot,
-                chargedAmount,
-                walletDeducted,
-                creditUsedAmount,
-            },
-        });
-
         // ── 10. Trigger provider fulfillment (fire-and-forget) ──────────────────
         // Always fires for AUTOMATIC products. executeOrder self-resolves the
         // provider adapter if none was pre-resolved, and handles all failures
@@ -1211,21 +1194,6 @@ const markOrderAsFailed = async (orderId, auditContext = null) => {
             },
         });
 
-        createAuditLog({
-            actorId, actorRole, ipAddress, userAgent,
-            action: WALLET_ACTIONS.CREDIT,
-            entityType: ENTITY_TYPES.WALLET,
-            entityId: order.userId,
-            metadata: {
-                orderId: order._id,
-                orderNumber: order.orderNumber,
-                walletRefunded: refundWallet,
-                creditRefunded: refundCredit,
-                totalRefund,
-                currency: order.currency,
-            },
-        });
-
         // Notification: fire-and-forget
         notifyOrderFailed(order);
 
@@ -1389,20 +1357,6 @@ const processOrderRefund = async (orderId, remains = 0, auditContext = null) => 
                 quantity: order.quantity,
                 isPartial,
                 currency: order.currency,
-            },
-        });
-
-        createAuditLog({
-            actorId, actorRole, ipAddress, userAgent,
-            action: WALLET_ACTIONS.CREDIT,
-            entityType: ENTITY_TYPES.WALLET,
-            entityId: order.userId,
-            metadata: {
-                orderId: order._id,
-                orderNumber: order.orderNumber,
-                refundAmount,
-                currency: order.currency,
-                reason: isPartial ? 'PARTIAL_DELIVERY' : 'ORDER_CANCELED',
             },
         });
 

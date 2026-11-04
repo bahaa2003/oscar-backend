@@ -35,6 +35,8 @@ const {
 const { toInternalStatus, isTerminal, requiresRefund } = require('../providers/statusMapper');
 const { notifyOrderCompleted, notifyOrderFailed } = require('../notifications/notification.service');
 
+const activeOrderExecutions = new Set();
+
 // ─────────────────────────────────────────────────────────────────────────────
 // IDEMPOTENT REFUND
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,26 +55,8 @@ const { notifyOrderCompleted, notifyOrderFailed } = require('../notifications/no
  * @returns {Promise<boolean>} true if refund was applied, false if already refunded
  */
 const refundFailedOrder = async (order) => {
-    // Compare-and-swap: only proceeds when refunded===false
-    const swapped = await Order.findOneAndUpdate(
-        { _id: order._id, refunded: false },
-        { $set: { refunded: true, refundedAt: new Date() } },
-        { new: true }
-    );
-
-    if (!swapped) {
-        // Already refunded by a concurrent call
-        return false;
-    }
-
-    // Execute the wallet refund inside its own session
-    const session = await mongoose.startSession();
+    if (order.refunded || await Order.exists({ _id: order._id, refunded: true })) return false;
     try {
-        session.startTransaction({
-            readConcern: { level: 'snapshot' },
-            writeConcern: { w: 'majority' },
-        });
-
         // ── Use the EXACT amounts originally deducted ────────────────────
         // NEVER do a live currency conversion. Exchange rates fluctuate.
         // The user must receive back exactly what was taken from their wallet.
@@ -90,8 +74,6 @@ const refundFailedOrder = async (order) => {
         const totalRefund = refundWallet + refundCredit;
 
         if (totalRefund <= 0) {
-            // Nothing to refund — undo the CAS flag and bail
-            await Order.findByIdAndUpdate(order._id, { $set: { refunded: false, refundedAt: null } });
             console.error(`[Fulfillment] refundFailedOrder: order ${order._id} has 0 refundable amount (walletDeducted=${order.walletDeducted}, chargedAmount=${order.chargedAmount})`);
             return false;
         }
@@ -102,56 +84,24 @@ const refundFailedOrder = async (order) => {
             creditUsedAmount: refundCredit,
             reference: order._id,
             description: `Auto-refund: provider order ${order.providerOrderId ?? 'N/A'} failed (${totalRefund} ${order.currency || 'USD'})`,
-            session,
+            idempotencyKey: `wallet:refund:${order._id}`,
+            auditEvents: [{
+                eventId: `wallet:refund:${order._id}:audit:ORDER_REFUNDED`, eventType: 'ORDER_REFUNDED',
+                action: ORDER_ACTIONS.REFUNDED, entityType: ENTITY_TYPES.ORDER, entityId: order._id,
+                actorId: order.userId, actorRole: ACTOR_ROLES.SYSTEM,
+                metadata: { orderId: order._id.toString(), totalRefund, currency: order.currency, reason: 'PROVIDER_ORDER_FAILED' },
+            }],
         });
 
-        await session.commitTransaction();
-
-        // Audit — fire-and-forget, after commit
-        createAuditLog({
-            actorId: order.userId,
-            actorRole: ACTOR_ROLES.SYSTEM,
-            action: ORDER_ACTIONS.REFUNDED,
-            entityType: ENTITY_TYPES.ORDER,
-            entityId: order._id,
-            metadata: {
-                orderId: order._id.toString(),
-                providerOrderId: order.providerOrderId,
-                currency: order.currency,
-                walletRefunded: refundWallet,
-                creditRefunded: refundCredit,
-                totalRefund,
-                originalChargedAmount: order.chargedAmount,
-                originalWalletDeducted: order.walletDeducted,
-            },
-        });
-
-        createAuditLog({
-            actorId: order.userId,
-            actorRole: ACTOR_ROLES.SYSTEM,
-            action: WALLET_ACTIONS.CREDIT,
-            entityType: ENTITY_TYPES.WALLET,
-            entityId: order.userId,
-            metadata: {
-                orderId: order._id.toString(),
-                providerOrderId: order.providerOrderId,
-                walletRefunded: refundWallet,
-                creditRefunded: refundCredit,
-                totalRefund,
-                currency: order.currency,
-                reason: 'PROVIDER_ORDER_FAILED',
-            },
-        });
-
-        return true;
+        const marked = await Order.findOneAndUpdate(
+            { _id: order._id, refunded: false },
+            { $set: { refunded: true, refundedAt: new Date() } },
+            { new: true }
+        );
+        return Boolean(marked || await Order.exists({ _id: order._id, refunded: true }));
 
     } catch (err) {
-        if (session.inTransaction()) await session.abortTransaction();
-        // Undo the refunded=true flag so the next retry can attempt again
-        await Order.findByIdAndUpdate(order._id, { $set: { refunded: false, refundedAt: null } });
         throw err;
-    } finally {
-        try { session.endSession(); } catch (_) { /* already ended */ }
     }
 };
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
@@ -169,7 +119,7 @@ const { Product } = require('../products/product.model');
  *
  * Case A: success=true  + Completed  → COMPLETED
  * Case B: success=true  + Pending    → keep PROCESSING, save providerOrderId
- * Case C: success=true  + Cancelled  → FAILED + refund
+ * Case C: success=true  + Cancelled  → CANCELED + refund
  * Case D: success=false              → FAILED + refund
  *
  * If no provider adapter is passed, the function self-resolves it from
@@ -183,7 +133,7 @@ const { Product } = require('../products/product.model');
  * @param {Object|null}     [auditContext]
  * @returns {Promise<{ order: Order, placed: boolean, refunded: boolean }>}
  */
-const executeOrder = async (orderId, provider = null, auditContext = null) => {
+const executeOrderInternal = async (orderId, provider = null, auditContext = null) => {
     // ─── TOP-LEVEL CRASH GUARD ─────────────────────────────────────────────
     // Wraps the entire function so ANY crash (parsing, DB, provider resolution)
     // marks the order FAILED + refund instead of leaving it stuck in PROCESSING.
@@ -456,6 +406,25 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         return { order: await Order.findById(orderId), placed: true, refunded: false };
     }
 
+    // A provider can return a terminal failure status in a successful HTTP/API
+    // response. Do not let CANCELED/PARTIAL/FAILED fall through to the
+    // immediate-completion path below. Reuse the same audited, idempotent
+    // transition/refund handling used by polling.
+    if ([ORDER_STATUS.CANCELED, ORDER_STATUS.PARTIAL, ORDER_STATUS.FAILED].includes(newStatus)) {
+        const { action } = await processOrderStatusResult(order, {
+            providerOrderId: result.providerOrderId,
+            providerStatus: result.providerStatus,
+            rawResponse: result.rawResponse,
+        });
+        const updatedOrder = await Order.findById(orderId);
+        return {
+            order: updatedOrder,
+            placed: false,
+            refunded: Boolean(updatedOrder?.refunded),
+            action,
+        };
+    }
+
     // Case A: Completed immediately
     await Order.findByIdAndUpdate(orderId, {
         $set: {
@@ -517,6 +486,30 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
 
         return { order: await Order.findById(orderId).catch(() => null), placed: false, refunded: false };
     }
+};
+
+/** Track fire-and-forget order fulfillment so shutdown and tests can drain it. */
+const executeOrder = (...args) => {
+    const task = executeOrderInternal(...args);
+    activeOrderExecutions.add(task);
+    task.then(
+        () => activeOrderExecutions.delete(task),
+        () => activeOrderExecutions.delete(task)
+    );
+    return task;
+};
+
+const drainOrderExecutions = async ({ timeoutMs = 8_000 } = {}) => {
+    if (!activeOrderExecutions.size) return { drained: true, pending: 0 };
+    let timer;
+    const settled = Promise.allSettled([...activeOrderExecutions]);
+    const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+        timer.unref?.();
+    });
+    const drained = await Promise.race([settled.then(() => true), timeout]);
+    clearTimeout(timer);
+    return { drained, pending: activeOrderExecutions.size };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -803,7 +796,8 @@ const _escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  *   2. Call adapter.checkOrders(ids) — one HTTP batch call per provider
  *   3. For each result:
  *       Completed / accept    → COMPLETED
- *       Cancelled / reject    → FAILED + refund  (via processOrderStatusResult)
+ *       Cancelled             → CANCELED + refund
+ *       Failed / reject       → FAILED + refund
  *       wait / Pending / 5xx  → leave PROCESSING, increment retryCount
  *
  * @param {Object|null} [providerOverride]  - single mock provider (tests only)
@@ -1029,6 +1023,7 @@ const pollProcessingOrders = async (providerOverride = null) => {
 
 module.exports = {
     executeOrder,
+    drainOrderExecutions,
     refundFailedOrder,
     processOrderStatusResult,
     pollProcessingOrders,

@@ -402,16 +402,16 @@ describe('Edge cases', () => {
             userId: customer._id,
             productId: product._id,
             quantity: 1,
-            unitPrice: 110,                   // basePrice(100) + 10% = 110
-            totalPrice: 110,
+            unitPrice: '110',                 // decimal price fields are persisted as strings
+            totalPrice: '110',
             walletDeducted: 110,
             creditUsedAmount: 0,
             status: ORDER_STATUS.PENDING,
             executionType: 'manual',
             // Required snapshot fields — written at creation, never changed
-            basePriceSnapshot: 100,
+            basePriceSnapshot: '100',
             markupPercentageSnapshot: 10,
-            finalPriceCharged: 110,
+            finalPriceCharged: '110',
             groupIdSnapshot: group._id,
         });
 
@@ -420,10 +420,10 @@ describe('Edge cases', () => {
 
         // All order snapshot fields must be unchanged
         const freshOrder = await Order.findById(order._id);
-        expect(freshOrder.unitPrice).toBe(110);              // unchanged
-        expect(freshOrder.basePriceSnapshot).toBe(100);      // unchanged
+        expect(freshOrder.unitPrice).toBe('110');            // unchanged
+        expect(freshOrder.basePriceSnapshot).toBe('100');    // unchanged
         expect(freshOrder.markupPercentageSnapshot).toBe(10); // unchanged — still 10, not 50
-        expect(freshOrder.finalPriceCharged).toBe(110);      // unchanged
+        expect(freshOrder.finalPriceCharged).toBe('110');    // unchanged
 
         // Group has the new percentage (only affects future orders)
         const freshGrp = await freshGroup(group._id);

@@ -45,6 +45,47 @@ const request = async (path, user, method = 'GET', body) => {
     return { status: response.status, body: await response.json() };
 };
 
+test('light and dark chrome and storefront grid settings stay independent and persist in a draft', async () => {
+    const admin = await createAdmin();
+    const configuration = preset('classic');
+    configuration.chrome.modes.light.header.background = '#FFFFFF';
+    configuration.chrome.modes.dark.header.background = '#0F172A';
+    configuration.chrome.modes.dark.header.foreground = '#F8FAFC';
+    configuration.chrome.modes.dark.header.accent = '#60A5FA';
+    configuration.layout = { productsPerRow: 3, categoriesPerRow: 2 };
+
+    const validated = validateTheme(configuration);
+    expect(validated.chrome.modes.light.header.background).toBe('#FFFFFF');
+    expect(validated.chrome.modes.dark.header.background).toBe('#0F172A');
+    expect(validated.layout).toEqual({ productsPerRow: 3, categoriesPerRow: 2 });
+
+    expect((await request('/api/admin/theme/draft', admin, 'POST', configuration)).status).toBe(200);
+    const restored = await theme.settings();
+    expect(restored.draft.chrome.modes.light.header.background).toBe('#FFFFFF');
+    expect(restored.draft.chrome.modes.dark.header.background).toBe('#0F172A');
+    expect(restored.draft.layout).toEqual({ productsPerRow: 3, categoriesPerRow: 2 });
+
+    const legacy = { ...configuration, chrome: {
+        header: configuration.chrome.modes.light.header,
+        bottomNav: configuration.chrome.modes.light.bottomNav,
+    } };
+    delete legacy.layout;
+    const migrated = validateTheme(legacy);
+    expect(migrated.chrome.modes.dark.header.background).toBe('#FFFFFF');
+    expect(migrated.layout).toEqual({ productsPerRow: 4, categoriesPerRow: 3 });
+});
+
+test('loading history into a draft does not publish another version', async () => {
+    const admin = await createAdmin();
+    await theme.publish(admin._id, preset('midnight'));
+    const response = await request('/api/admin/theme/restore-draft', admin, 'POST', { version: 1 });
+    expect(response.status).toBe(200);
+    expect(response.body.data.draft.modes.light.presetId).toBe('midnight');
+    expect((await theme.settings()).version).toBe(1);
+    expect((await theme.settings()).draft.modes.light.presetId).toBe('midnight');
+    expect(await ThemeHistory.countDocuments({ scopeKey: 'main' })).toBe(1);
+});
+
 test('admin draft and preview do not consume a free publish; cooldown and restore do', async () => {
     const user = await createAdmin();
     const configuration = preset('midnight');
@@ -276,10 +317,14 @@ test('ULTRA header, bottom navigation, and sidebar publish through the public th
     await activatePlan(admin, 'THEME_ULTRA');
     const configuration = preset('gold');
     configuration.brand.sidebarTemplate = 'aurora';
-    configuration.chrome.header = { ...configuration.chrome.header, template: 'floating', height: 88,
+    configuration.chrome.modes.light.header = { ...configuration.chrome.modes.light.header, template: 'floating', height: 88,
         width: 92, background: '#FFFFFF', foreground: '#0F172A', accent: '#2563EB', radius: 16 };
-    configuration.chrome.bottomNav = { ...configuration.chrome.bottomNav, template: 'pill', height: 72,
+    configuration.chrome.modes.dark.header = { ...configuration.chrome.modes.dark.header, template: 'floating', height: 88,
+        width: 92, background: '#0F172A', foreground: '#F8FAFC', accent: '#60A5FA', radius: 16 };
+    configuration.chrome.header = configuration.chrome.modes.light.header;
+    configuration.chrome.modes.light.bottomNav = { ...configuration.chrome.modes.light.bottomNav, template: 'pill', height: 72,
         width: 88, background: '#FFFFFF', foreground: '#0F172A', accent: '#2563EB', radius: 24 };
+    configuration.chrome.bottomNav = configuration.chrome.modes.light.bottomNav;
 
     const published = await request('/api/admin/theme/publish', admin, 'POST', configuration);
     expect(published.status).toBe(200);
@@ -289,6 +334,10 @@ test('ULTRA header, bottom navigation, and sidebar publish through the public th
         chrome: {
             header: expect.objectContaining({ template: 'floating', height: 88, width: 92, radius: 16 }),
             bottomNav: expect.objectContaining({ template: 'pill', height: 72, width: 88, radius: 24 }),
+            modes: {
+                light: { header: expect.objectContaining({ background: '#FFFFFF' }) },
+                dark: { header: expect.objectContaining({ background: '#0F172A', foreground: '#F8FAFC' }) },
+            },
         },
     });
 });

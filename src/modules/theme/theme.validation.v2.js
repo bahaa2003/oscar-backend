@@ -29,6 +29,7 @@ const palettes = {
 const colorKeys = ['primary','secondary','accent','background','surface','text','mutedText','border'];
 const allowed = {
     typography: { arabicFont: [...FREE_FONTS_AR, ...PRO_FONTS_AR], englishFont: [...FREE_FONTS_EN, ...PRO_FONTS_EN], baseSize: [14,16,18,20], headingWeight: [600,700,800] },
+    layout: { productsPerRow: [2, 3, 4], categoriesPerRow: [2, 3] },
     buttons: { radius: [0,4,8,12,24], style: ['solid','outline'] },
     cards: { radius: [0,4,8,12,16,24], shadow: ['none','subtle','medium'] },
     navigation: { style: ['standard','compact'] },
@@ -43,10 +44,18 @@ const neonSections = ['purchase', 'hero', 'categories', 'bestSellers'];
 const neonColors = { purchase: '#22D3EE', hero: '#A855F7', categories: '#34D399', bestSellers: '#F59E0B' };
 const baseNeon = () => ({ ...Object.fromEntries(neonSections.map((section) =>
     [section, { enabled: false, color: neonColors[section], speed: 5 }])), categoryCards: {} });
-const baseChrome = () => ({
-    header: { template: 'bar', height: 64, width: 100, background: '#FFFFFF', foreground: '#0F172A', accent: '#2563EB', radius: 0 },
-    bottomNav: { template: 'bar', height: 64, width: 100, background: '#FFFFFF', foreground: '#0F172A', accent: '#2563EB', radius: 0 },
+const chromePart = (mode) => ({
+    template: 'bar', height: 64, width: 100,
+    background: mode === 'dark' ? '#0F172A' : '#FFFFFF',
+    foreground: mode === 'dark' ? '#F8FAFC' : '#0F172A',
+    accent: mode === 'dark' ? '#60A5FA' : '#2563EB', radius: 0,
 });
+const baseChrome = () => {
+    const modes = Object.fromEntries(['light', 'dark'].map((mode) => [mode, {
+        header: chromePart(mode), bottomNav: chromePart(mode),
+    }]));
+    return { header: modes.light.header, bottomNav: modes.light.bottomNav, modes };
+};
 const baseSidebarMetrics = () => ({ width: 270, height: 100, radius: 28 });
 const validateChromePart = (value, path, templateValues, radiusValues, heightRange, widthRange) => {
     keysOnly(value, ['template', 'height', 'width', 'background', 'foreground', 'accent', 'radius'], path);
@@ -124,11 +133,15 @@ function validateAppearance(value, path) {
 }
 
 function validateTheme(value) {
-    keysOnly(value,['schemaVersion','modes','brand','chrome'],'theme');
+    keysOnly(value,['schemaVersion','modes','brand','chrome','layout'],'theme');
     if (value.schemaVersion !== 2) invalid('schemaVersion');
     keysOnly(value.modes,['light','dark'],'modes');
     const modes = { light: validateAppearance(value.modes.light,'modes.light'), dark: validateAppearance(value.modes.dark,'modes.dark') };
     keysOnly(value.brand,['logoPath','logoWidth','slides','marqueeTextArabic','targetBannerPath','sidebarTemplate','sidebarMetrics'],'brand');
+    const inputLayout = value.layout === undefined ? { productsPerRow: 4, categoriesPerRow: 3 } : value.layout;
+    keysOnly(inputLayout, ['productsPerRow', 'categoriesPerRow'], 'layout');
+    const layout = { productsPerRow: inputLayout.productsPerRow, categoriesPerRow: inputLayout.categoriesPerRow };
+    if (![2, 3, 4].includes(layout.productsPerRow) || ![2, 3].includes(layout.categoriesPerRow)) invalid('layout');
     const { logoPath,logoWidth,slides } = value.brand;
     const targetBannerPath = value.brand.targetBannerPath === undefined ? null : value.brand.targetBannerPath;
     const marqueeTextArabic = value.brand.marqueeTextArabic === undefined
@@ -145,11 +158,24 @@ function validateTheme(value) {
         || !Number.isInteger(sidebarMetrics.height) || sidebarMetrics.height < 70 || sidebarMetrics.height > 100
         || ![0,4,8,12,16,20,24,28,32,36,40,44,48].includes(sidebarMetrics.radius)) invalid('brand.sidebarMetrics');
     const inputChrome = value.chrome === undefined ? baseChrome() : value.chrome;
-    keysOnly(inputChrome, ['header', 'bottomNav'], 'chrome');
-    const chrome = {
-        header: validateChromePart(inputChrome.header, 'chrome.header', ['bar', 'floating'], [0, 4, 8, 12, 16, 24, 32], [48, 120], [60, 100]),
-        bottomNav: validateChromePart(inputChrome.bottomNav, 'chrome.bottomNav', ['bar', 'floating', 'pill'], [0, 4, 8, 12, 16, 24, 32], [48, 100], [60, 100]),
-    };
+    keysOnly(inputChrome, ['header', 'bottomNav', 'modes'], 'chrome');
+    const inputChromeModes = inputChrome.modes;
+    if (inputChromeModes !== undefined) keysOnly(inputChromeModes, ['light', 'dark'], 'chrome.modes');
+    const baseChromeModes = baseChrome().modes;
+    const chromeModes = {};
+    const rootChromeOverridesModes = Boolean(inputChromeModes && (
+        (inputChrome.header && JSON.stringify(inputChrome.header) !== JSON.stringify(inputChromeModes.light?.header))
+        || (inputChrome.bottomNav && JSON.stringify(inputChrome.bottomNav) !== JSON.stringify(inputChromeModes.light?.bottomNav))));
+    for (const mode of ['light', 'dark']) {
+        const modeInput = inputChromeModes?.[mode] || {};
+        keysOnly(modeInput, ['header', 'bottomNav'], `chrome.${mode}`);
+        const legacyInput = !inputChromeModes || rootChromeOverridesModes ? inputChrome : {};
+        chromeModes[mode] = {
+            header: validateChromePart(legacyInput.header || modeInput.header || baseChromeModes[mode].header, `chrome.${mode}.header`, ['bar', 'floating'], [0, 4, 8, 12, 16, 24, 32], [48, 120], [60, 100]),
+            bottomNav: validateChromePart(legacyInput.bottomNav || modeInput.bottomNav || baseChromeModes[mode].bottomNav, `chrome.${mode}.bottomNav`, ['bar', 'floating', 'pill'], [0, 4, 8, 12, 16, 24, 32], [48, 100], [60, 100]),
+        };
+    }
+    const chrome = { header: chromeModes.light.header, bottomNav: chromeModes.light.bottomNav, modes: chromeModes };
     if (logoPath !== null && (typeof logoPath !== 'string' || !mediaPath.test(logoPath))) invalid('brand.logoPath');
     if (!Number.isInteger(logoWidth) || logoWidth<80 || logoWidth>300) invalid('brand.logoWidth');
     if (!Array.isArray(slides) || slides.length !== 4 || slides.some((slide) => slide !== null
@@ -161,7 +187,7 @@ function validateTheme(value) {
         || /[<>\u0000-\u001F\u007F]/u.test(marqueeTextArabic)) invalid('brand.marqueeTextArabic');
     if (!['default', 'royal', 'glass', 'aurora', 'square', 'rounded'].includes(sidebarTemplate)) invalid('brand.sidebarTemplate');
     return { schemaVersion: 2, modes, brand: { logoPath, logoWidth, slides: [...slides], marqueeTextArabic,
-        targetBannerPath, sidebarTemplate, sidebarMetrics }, chrome };
+        targetBannerPath, sidebarTemplate, sidebarMetrics }, chrome, layout };
 }
 
 function preset(id) {
@@ -186,7 +212,9 @@ function safeTheme(value) {
 function assertPlanAllows(theme, plan = 'FREE') {
     if (plan === 'THEME_ULTRA') return;
     const defaultChrome = baseChrome();
-    if (JSON.stringify(theme.chrome) !== JSON.stringify(defaultChrome)) {
+    const legacyDefaultChrome = { ...defaultChrome, modes: { light: defaultChrome.modes.light, dark: defaultChrome.modes.light } };
+    if (JSON.stringify(theme.chrome) !== JSON.stringify(defaultChrome)
+        && JSON.stringify(theme.chrome) !== JSON.stringify(legacyDefaultChrome)) {
         throw new AppError('Header and bottom navigation customization requires Theme Customization Ultra.', 403, 'THEME_ULTRA_REQUIRED');
     }
     if (plan !== 'THEME_PRO') {

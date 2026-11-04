@@ -37,28 +37,28 @@ const getTransactionHistory = catchAsync(async (req, res) => {
 // POST /admin/wallets/:userId/add
 const addFunds = catchAsync(async (req, res) => {
     const { amount, reason, description } = req.body;
-    const result = await svc.addFunds(req.params.userId, amount, reason || description, req.user._id);
+    const result = await svc.addFunds(req.params.userId, amount, reason || description, req.user._id, req.get('Idempotency-Key') || req.body.idempotencyKey);
     sendCreated(res, { transaction: result.transaction }, 'Funds added to wallet');
 });
 
 // POST /admin/wallets/:userId/deduct
 const deductFunds = catchAsync(async (req, res) => {
     const { amount, reason, description } = req.body;
-    const result = await svc.deductFunds(req.params.userId, amount, reason || description, req.user._id);
+    const result = await svc.deductFunds(req.params.userId, amount, reason || description, req.user._id, req.get('Idempotency-Key') || req.body.idempotencyKey);
     sendSuccess(res, { transaction: result.transaction }, 'Funds deducted from wallet');
 });
 
 // PUT /admin/wallets/:userId/set
 const setBalance = catchAsync(async (req, res) => {
     const { targetBalance, reason, description } = req.body;
-    const result = await svc.setBalance(req.params.userId, targetBalance, reason || description, req.user._id);
+    const result = await svc.setBalance(req.params.userId, targetBalance, reason || description, req.user._id, req.get('Idempotency-Key') || req.body.idempotencyKey);
     sendSuccess(res, { transaction: result.transaction, user: result.user }, 'Balance set successfully');
 });
 
 // POST /admin/users/adjust-debt
 const adjustDebt = catchAsync(async (req, res) => {
-    const { percentage } = req.body;
-    const result = await svc.adjustNegativeBalancesForInflation(percentage, req.user._id);
+    const { percentage, idempotencyKey } = req.body;
+    const result = await svc.adjustNegativeBalancesForInflation(percentage, req.user._id, null, req.get('Idempotency-Key') || idempotencyKey);
     sendSuccess(res, {
         usersAdjusted: result.usersAdjusted,
         totalAdjustment: result.totalAdjustment,

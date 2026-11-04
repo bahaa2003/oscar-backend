@@ -119,6 +119,10 @@ const updateSetting = async (key, value, adminId) => {
 
     const before = setting?.value;
 
+    if (key === 'maintenanceMode' && typeof value !== 'boolean') {
+        throw new ValidationError('Maintenance mode must be a boolean.');
+    }
+
     if (key === 'paymentGroups') {
         validatePaymentGroupsFeePercent(value);
         validatePaymentGroupsQrCodeImages(value);

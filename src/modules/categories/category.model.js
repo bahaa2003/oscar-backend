@@ -76,7 +76,6 @@ const categorySchema = new mongoose.Schema(
 
 // ─── Indexes ──────────────────────────────────────────────────────────────────
 categorySchema.index({ isActive: 1, sortOrder: 1 });
-categorySchema.index({ slug: 1 });
 categorySchema.index({ parentCategory: 1, isActive: 1, sortOrder: 1 });
 
 // ─── Pre-save: auto-generate slug from name ───────────────────────────────────
