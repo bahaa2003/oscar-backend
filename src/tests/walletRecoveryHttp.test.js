@@ -7,6 +7,7 @@ const { User, USER_STATUS } = require('../modules/users/user.model');
 const { DepositRequest } = require('../modules/deposits/deposit.model');
 const { DepositCreditGuard } = require('../modules/deposits/depositCreditGuard.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
+const { WalletOperation } = require('../modules/wallet/walletOperation.model');
 
 let server;
 let baseUrl;
@@ -104,6 +105,43 @@ test('admin wallet credit treats a legacy null wallet reservation as unlocked', 
     expect(response.status).toBe(201);
     expect((await User.findById(customer._id)).walletBalance).toBe(825);
     expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey: 'admin-credit-null-wallet-lock-001' })).toBe(1);
+});
+
+test('admin wallet credit repairs a stale PREPARED retry without applying a stale balance snapshot', async () => {
+    const admin = await createAdmin();
+    const { customer } = await createCustomerWithGroup({ walletBalance: -822.173, currency: 'EGP' });
+    const idempotencyKey = 'admin-credit-stale-prepared-retry-001';
+    await WalletOperation.create({
+        idempotencyKey,
+        userId: customer._id,
+        operationType: 'ADMIN_CREDIT',
+        transactionType: 'CREDIT',
+        amount: 800,
+        delta: 800,
+        currency: 'EGP',
+        expectedBalance: -822.17,
+        targetBalance: -22.17,
+        creditUsedAfter: 0,
+        status: 'PREPARED',
+    });
+
+    const response = await fetch(`${baseUrl}/api/admin/wallets/${customer._id}/add`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${jwt.sign({ id: String(admin._id) }, process.env.JWT_SECRET)}`,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify({ amount: 800, reason: 'Retry stale admin credit', idempotencyKey }),
+    });
+
+    expect(response.status).toBe(201);
+    expect((await User.findById(customer._id)).walletBalance).toBe(-22.17);
+    const operation = await WalletOperation.findOne({ idempotencyKey });
+    expect(operation.status).toBe('COMPLETED');
+    expect(operation.expectedBalance).toBeNull();
+    expect(operation.targetBalance).toBeNull();
+    expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey })).toBe(1);
 });
 
 test('deposit recovery requires MANAGE_DEPOSITS and a valid incomplete guard resumes through HTTP', async () => {

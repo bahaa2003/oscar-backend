@@ -151,6 +151,34 @@ const ensureOperationRecord = async (input, session = null) => {
     return operation;
 };
 
+// An earlier ADMIN_CREDIT implementation persisted a balance snapshot before
+// acquiring the wallet lock. A failed request could therefore leave a PREPARED
+// idempotency record that permanently retried with a stale expectedBalance.
+// Safely upgrade only unclaimed PREPARED credits; applied or actively leased
+// operations keep their original immutable intent and recovery path.
+const upgradePreparedAdminCredit = async (operation, input) => {
+    if (operation.operationType !== 'ADMIN_CREDIT' || operation.status !== STATUS.PREPARED) return operation;
+    const data = buildOperation(input);
+    if (data.creditUsedMode !== 'ADMIN_CREDIT' || data.targetBalance != null || data.expectedBalance != null) return operation;
+    const now = new Date();
+    const upgraded = await WalletOperation.findOneAndUpdate(
+        {
+            _id: operation._id,
+            status: STATUS.PREPARED,
+            $or: [{ leaseUntil: null }, { leaseUntil: { $lte: now } }],
+        },
+        { $set: {
+            expectedBalance: null,
+            targetBalance: null,
+            creditUsedAfter: null,
+            creditUsedMode: 'ADMIN_CREDIT',
+            auditMetadata: data.auditMetadata,
+        } },
+        { new: true }
+    );
+    return upgraded || operation;
+};
+
 const createLock = (operation, token) => ({
     operationKey: operation.idempotencyKey,
     depositId: null,
@@ -245,7 +273,9 @@ const applyWalletOperation = async (operation, token, session = null) => {
         ] };
     }
     const balanceExpression = operation.targetBalance == null
-        ? { $add: [{ $ifNull: ['$walletBalance', 0] }, operation.delta] }
+        ? (operation.creditUsedMode === 'ADMIN_CREDIT'
+            ? { $round: [{ $add: [{ $ifNull: ['$walletBalance', 0] }, operation.delta] }, 2] }
+            : { $add: [{ $ifNull: ['$walletBalance', 0] }, operation.delta] })
         : { $literal: operation.targetBalance };
     const nextBalance = balanceExpression;
     const update = [{ $set: {
@@ -261,8 +291,23 @@ const applyWalletOperation = async (operation, token, session = null) => {
         ...(operation.creditUsedMode === 'REFUND' ? {
             creditUsed: { $max: [0, { $subtract: [{ $ifNull: ['$creditUsed', 0] }, operation.creditUsedAmount || 0] }] },
         } : {}),
+        ...(operation.creditUsedMode === 'ADMIN_CREDIT' ? {
+            creditUsed: { $cond: [
+                { $and: [
+                    { $lt: [{ $ifNull: ['$walletBalance', 0] }, 0] },
+                    { $gt: [{ $ifNull: ['$creditUsed', 0] }, 0] },
+                ] },
+                { $max: [0, { $subtract: [
+                    { $ifNull: ['$creditUsed', 0] },
+                    { $min: [operation.amount, { $ifNull: ['$creditUsed', 0] }] },
+                ] }] },
+                { $ifNull: ['$creditUsed', 0] },
+            ] },
+        } : {}),
         'activeWalletOperation.status': 'APPLIED',
-        'activeWalletOperation.balanceBefore': { $ifNull: ['$walletBalance', 0] },
+        'activeWalletOperation.balanceBefore': operation.creditUsedMode === 'ADMIN_CREDIT'
+            ? { $round: [{ $ifNull: ['$walletBalance', 0] }, 2] }
+            : { $ifNull: ['$walletBalance', 0] },
         'activeWalletOperation.balanceAfter': nextBalance,
     } }];
     const user = await User.findOneAndUpdate(filter, update, { new: true, ...(session ? { session } : {}) })
@@ -454,7 +499,8 @@ const resumeWalletOperation = async (operationIdOrKey, { leaseToken: preferredTo
 const executeWalletOperation = async (input) => {
     await ensureWalletOperationIndexesReady();
     if (!input.idempotencyKey) throw new BusinessRuleError('Wallet operation requires an idempotency key.', 'WALLET_OPERATION_KEY_REQUIRED');
-    const operation = await ensureOperationRecord(input, input.session || null);
+    let operation = await ensureOperationRecord(input, input.session || null);
+    if (!input.session) operation = await upgradePreparedAdminCredit(operation, input);
     if (operation.status === STATUS.FAILED) throw new BusinessRuleError(operation.lastError || 'Wallet operation is marked for manual review.', operation.failureCode || 'WALLET_OPERATION_MANUAL_REVIEW_REQUIRED');
     if (input.session) return executeInSession({ ...input, idempotencyKey: operation.idempotencyKey }, input.session);
     if (operation.status === STATUS.COMPLETED) return { operation, transaction: await WalletTransaction.findOne({ idempotencyKey: operation.idempotencyKey }), completed: true };

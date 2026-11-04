@@ -110,35 +110,21 @@ const addFunds = async (userId, amount, reason, adminId, idempotencyKey = null) 
         );
     }
 
-    // Fetch user first to compute credit repayment
+    // Read the wallet currency and construct the idempotency key. The actual
+    // balance and credit repayment are computed atomically by the wallet
+    // operation after it owns the user's wallet reservation.
     const user = await User.findById(userId);
     if (!user) throw new NotFoundError('User');
 
     const userCurrency = user.currency || 'USD';
-    // Keep the exact stored snapshot for the atomic compare-and-set. The
-    // displayed/financial calculation still follows the existing 2-decimal
-    // wallet policy, but rounding this filter value can make legacy balances
-    // with extra decimal places fail the wallet reservation with 422.
-    const expectedBalance = Number(user.walletBalance || 0);
-    const balanceBefore = safeRound(expectedBalance);
-    const creditUsedBefore = safeRound(user.creditUsed || 0);
-
-    // If user has drawn credit (creditUsed > 0), adding funds repays credit first.
-    // Example: balance=-50, creditUsed=50, add 80 → creditUsed=0, balance=30
-    let creditRepaid = 0;
-    if (creditUsedBefore > 0 && balanceBefore < 0) {
-        creditRepaid = safeRound(Math.min(parsedAmount, creditUsedBefore));
-    }
-
-    const balanceAfter = safeRound(balanceBefore + parsedAmount);
-    const creditUsedAfter = safeRound(creditUsedBefore - creditRepaid);
+    const balanceSnapshotForKey = safeRound(user.walletBalance || 0);
 
     const result = await executeWalletOperation({
         userId,
-        idempotencyKey: stableAdminOperationKey(userId, 'ADD', parsedAmount, reason, balanceBefore, idempotencyKey),
+        idempotencyKey: stableAdminOperationKey(userId, 'ADD', parsedAmount, reason, balanceSnapshotForKey, idempotencyKey),
         operationType: 'ADMIN_CREDIT', transactionType: TRANSACTION_TYPES.CREDIT,
-        amount: parsedAmount, delta: parsedAmount, targetBalance: balanceAfter, expectedBalance,
-        creditUsedAfter, currency: userCurrency, description: reason || `Admin manual credit (${userCurrency})`,
+        amount: parsedAmount, delta: parsedAmount, targetBalance: null, expectedBalance: null,
+        creditUsedMode: 'ADMIN_CREDIT', currency: userCurrency, description: reason || `Admin manual credit (${userCurrency})`,
         actorId: adminId, actorRole: ACTOR_ROLES.ADMIN, eventType: OUTBOX_EVENT.ADMIN,
         auditAction: require('../audit/audit.constants').WALLET_ACTIONS.ADMIN_BALANCE_ADJUSTMENT,
         auditMetadata: {
@@ -147,9 +133,6 @@ const addFunds = async (userId, amount, reason, adminId, idempotencyKey = null) 
             currency: userCurrency,
             reason,
             userId,
-            balanceBefore,
-            balanceAfter,
-            creditRepaid,
         },
     });
     return { transaction: result.transaction };
