@@ -99,6 +99,16 @@ async function resetDraft() {
     return { draft: null };
 }
 
+async function restoreToDraft(version) {
+    if (!Number.isSafeInteger(version) || version < 1) throw new NotFoundError('Theme version');
+    const record = await ThemeHistory.findOne({ scopeKey: SCOPE_KEY, version }).lean();
+    if (!record) throw new NotFoundError('Theme version');
+    const draft = validateTheme(record.configuration);
+    await ThemeSettings.findOneAndUpdate({ scopeKey: SCOPE_KEY },
+        { $set: { draft }, $setOnInsert: { scopeKey: SCOPE_KEY } }, { upsert: true, new: true, runValidators: true });
+    return { draft: safeTheme(draft), version };
+}
+
 async function publish(actorId, value, operation = 'PUBLISH') {
     const theme = validateTheme(value);
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -159,5 +169,5 @@ function presets() {
         ...PRO_PRESETS.map((id) => ({ id, tier: 'THEME_PRO', configuration: preset(id) }))];
 }
 
-module.exports = { settings, published, getStatus, saveDraft, resetDraft, publish, restore, history, presets,
+module.exports = { settings, published, getStatus, saveDraft, resetDraft, restoreToDraft, publish, restore, history, presets,
     validateTheme, eligibility, currentSubscription, addCalendarMonthsUTC, plan, plans, allowed, SCOPE_KEY };

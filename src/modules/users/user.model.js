@@ -211,6 +211,60 @@ const userSchema = new mongoose.Schema(
             default: 0,
         },
 
+        /** Temporary idempotency markers for resumable deposit credits on standalone MongoDB. */
+        appliedDepositCredits: {
+            type: [{
+                depositId: { type: mongoose.Schema.Types.ObjectId, ref: 'DepositRequest', required: true },
+                amount: { type: Number, required: true },
+                balanceBefore: { type: Number, required: true },
+                balanceAfter: { type: Number, required: true },
+            }],
+            default: undefined,
+            select: false,
+        },
+
+        /** Prevent wallet currency changes while deposit approvals are in flight. */
+        pendingDepositApprovals: {
+            type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'DepositRequest' }],
+            default: undefined,
+            select: false,
+        },
+
+        /**
+         * Fenced, single active deposit wallet mutation. The balance mutation
+         * and transition PREPARED -> APPLIED are written atomically to this
+         * same user document. Other wallet writers must match this field as
+         * absent before changing walletBalance.
+         */
+        activeWalletOperation: {
+            type: new mongoose.Schema({
+                operationKey: { type: String, trim: true, required: true },
+                depositId: { type: mongoose.Schema.Types.ObjectId, ref: 'DepositRequest', default: null },
+                operationType: { type: String, trim: true, default: 'DEPOSIT_CREDIT' },
+                leaseOwner: { type: String, trim: true, required: true },
+                leaseToken: { type: String, trim: true, required: true },
+                leaseUntil: { type: Date, required: true },
+                status: { type: String, enum: ['PREPARED', 'APPLIED'], required: true },
+                amount: { type: Number, required: true },
+                delta: { type: Number, default: null },
+                currency: { type: String, uppercase: true, trim: true, required: true },
+                transactionType: { type: String, trim: true, default: null },
+                reference: { type: mongoose.Schema.Types.ObjectId, default: null },
+                description: { type: String, maxlength: 255, default: '' },
+                creditUsedAfter: { type: Number, default: null },
+                creditUsedMode: { type: String, default: null },
+                creditUsedAmount: { type: Number, default: null },
+                expectedBalance: { type: Number, default: null },
+                requireActiveUser: { type: Boolean, default: false },
+                targetBalance: { type: Number, default: null },
+                targetCurrency: { type: String, default: null },
+                balanceBefore: { type: Number, default: null },
+                balanceAfter: { type: Number, default: null },
+            }, { _id: false }),
+            default: undefined,
+            select: false,
+        },
+
         creditLimit: {
             type: Number,
             default: 0,

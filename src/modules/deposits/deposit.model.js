@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
 /**
  * Deposit request status lifecycle.
  *
- *  PENDING  → APPROVED   (admin approves, wallet is credited with amountUsd)
+ *  PENDING  → CREDIT_PENDING → APPROVED (claim, credit, then finalize)
  *  PENDING  → REJECTED   (admin rejects, wallet unchanged)
  *
  * Status transitions are one-way — you cannot un-approve or un-reject.
@@ -13,6 +13,7 @@ const mongoose = require('mongoose');
  */
 const DEPOSIT_STATUS = Object.freeze({
     PENDING: 'PENDING',
+    CREDIT_PENDING: 'CREDIT_PENDING',
     APPROVED: 'APPROVED',
     REJECTED: 'REJECTED',
 });
@@ -161,6 +162,14 @@ const depositRequestSchema = new mongoose.Schema(
             type: Date,
             default: null,
         },
+
+        /** Frozen credit instructions used to resume a partially completed approval. */
+        approvalCreditAmount: { type: Number, min: 0.01, default: null },
+        approvalCreditCurrency: { type: String, uppercase: true, trim: true, default: null },
+        approvalConversionNote: { type: String, trim: true, default: null },
+        approvalAuditMetadata: { type: mongoose.Schema.Types.Mixed, default: null },
+        approvalRecoveryError: { type: String, trim: true, default: null },
+        approvalRecoveryErrorAt: { type: Date, default: null },
     },
     {
         timestamps: true,  // createdAt + updatedAt

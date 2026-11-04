@@ -59,6 +59,9 @@ const walletTransactionSchema = new mongoose.Schema(
             default: null,
         },
 
+        /** Deterministic key for financial operations that must never ledger twice. */
+        idempotencyKey: { type: String, trim: true, default: null },
+
         status: {
             type: String,
             enum: Object.values(TRANSACTION_STATUS),
@@ -79,6 +82,10 @@ const walletTransactionSchema = new mongoose.Schema(
 // Compound index for efficient user transaction history queries
 walletTransactionSchema.index({ userId: 1, createdAt: -1 });
 walletTransactionSchema.index({ reference: 1 });
+walletTransactionSchema.index(
+    { idempotencyKey: 1 },
+    { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } }
+);
 
 const WalletTransaction = mongoose.model('WalletTransaction', walletTransactionSchema);
 

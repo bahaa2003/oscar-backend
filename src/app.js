@@ -34,6 +34,8 @@ const notificationRoutes = require('./modules/notifications/notification.routes'
 const currencyRoutes = require('./modules/currency/currency.routes');
 const whatsappRoutes = require('./modules/whatsapp/whatsapp.routes');
 const uploadRoutes = require('./shared/routes/upload.routes');
+const maintenanceRoutes = require('./modules/maintenance/maintenance.routes');
+const maintenanceGate = require('./shared/middlewares/maintenanceGate');
 const path = require('path');
 // Seed default settings on startup (idempotent, no-op if already seeded)
 require('./modules/admin/setting.model').seedDefaultSettings().catch(() => { });
@@ -107,6 +109,11 @@ const API_PREFIX = '/api';
 
 // Apply general rate limiter to all API routes (500 req / 15 min per IP)
 app.use(API_PREFIX, apiLimiter);
+
+// Maintenance status/control stays reachable so visitors can render the outage page
+// and an authenticated administrator can restore service.
+app.use(`${API_PREFIX}/maintenance`, maintenanceRoutes);
+app.use(API_PREFIX, maintenanceGate);
 
 app.use(`${API_PREFIX}/auth`, authRoutes);
 app.use(`${API_PREFIX}/users`, userRoutes);

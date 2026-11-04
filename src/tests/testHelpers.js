@@ -56,6 +56,11 @@ const connectTestDB = async () => {
 };
 
 const disconnectTestDB = async () => {
+    const fulfillment = require('../modules/orders/orderFulfillment.service');
+    const drained = await fulfillment.drainOrderExecutions({ timeoutMs: 10_000 });
+    if (!drained.drained) {
+        throw new Error(`Cannot close test MongoDB while ${drained.pending} order fulfillment task(s) are still running.`);
+    }
     await mongoose.disconnect();
 };
 

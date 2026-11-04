@@ -110,6 +110,8 @@ const targetSvc = require('../targets/target.service');
 const targetValidation = require('../targets/target.validation');
 const notifSvc = require('../notifications/notification.service');
 const notifValidation = require('../notifications/notification.validation');
+const walletOperationService = require('../wallet/walletOperation.service');
+const { listOutboxIssues } = require('../audit/auditOutbox.service');
 
 const router = Router();
 const adminOnly = authorize('ADMIN');
@@ -186,6 +188,24 @@ router.get('/orders/:id', requirePermission('MANAGE_ORDERS'), ordersCtrl.getOrde
 // ═══════════════════════════════════════════════════════════════════════════════
 // WALLETS
 // ═══════════════════════════════════════════════════════════════════════════════
+
+router.get('/wallet-operations/issues', requirePermission('MANAGE_WALLET'), catchAsync(async (req, res) => {
+    const [walletOperations, activeWalletLocks, auditOutbox, depositApprovals] = await Promise.all([
+        walletOperationService.listWalletOperationIssues({ limit: Number(req.query.limit) || 100 }),
+        walletOperationService.listActiveWalletLocks({ limit: Number(req.query.limit) || 100 }),
+        listOutboxIssues({ limit: Number(req.query.limit) || 100 }),
+        depositSvc.listDepositApprovalIssues({ limit: Number(req.query.limit) || 100 }),
+    ]);
+    sendSuccess(res, { walletOperations, activeWalletLocks, auditOutbox, depositApprovals }, 'Wallet recovery issues retrieved');
+}));
+router.post('/wallet-operations/deposits/:depositId/recover', requirePermission('MANAGE_DEPOSITS'), catchAsync(async (req, res) => {
+    const result = await depositSvc.repairDepositApproval(req.params.depositId, req.user._id);
+    sendSuccess(res, result, 'Deposit recovery attempt completed');
+}));
+router.post('/wallet-operations/:id/recover', requirePermission('MANAGE_WALLET'), catchAsync(async (req, res) => {
+    const result = await walletOperationService.recordWalletOperationRepairAttempt(req.params.id, req.user._id);
+    sendSuccess(res, result, 'Wallet recovery attempt completed');
+}));
 
 router.get('/wallets', requirePermission('MANAGE_WALLET'), walletCtrl.listWallets);
 router.get('/wallets/:userId/transactions', requirePermission('MANAGE_WALLET'), walletCtrl.getTransactionHistory);

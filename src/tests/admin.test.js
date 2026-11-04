@@ -228,8 +228,8 @@ describe('[2] Admin Wallet Service', () => {
     it('getWallet returns user with balance fields', async () => {
         const { customer } = await setup();
         const wallet = await adminWalletService.getWallet(customer._id);
-        expect(wallet.walletBalance).toBeDefined();
-        expect(wallet.creditLimit).toBeDefined();
+        expect(wallet.user.walletBalance).toBeDefined();
+        expect(wallet.user.creditLimit).toBeDefined();
     });
 
     it('getTransactionHistory returns paginated transactions', async () => {

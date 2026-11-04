@@ -11,7 +11,7 @@
  */
 
 const { User, USER_STATUS, ROLES } = require('../users/user.model');
-const { NotFoundError, ConflictError, BusinessRuleError } = require('../../shared/errors/AppError');
+const { AppError, NotFoundError, ConflictError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const {
     USER_ACTIONS,
@@ -19,6 +19,7 @@ const {
     ENTITY_TYPES,
     ACTOR_ROLES,
 } = require('../audit/audit.constants');
+const { executeWalletOperation, OUTBOX_EVENT } = require('../wallet/walletOperation.service');
 
 // ─── Private helper ────────────────────────────────────────────────────────────
 
@@ -313,6 +314,14 @@ const updateUserCurrency = async (id, currency, adminId) => {
     // Same currency → no-op
     if (user.currency === code) return user;
 
+    const { DepositRequest, DEPOSIT_STATUS } = require('../deposits/deposit.model');
+    const userWithReservations = await User.findById(id).select('+pendingDepositApprovals +activeWalletOperation currency walletBalance');
+    const hasReservation = (userWithReservations?.pendingDepositApprovals || []).length > 0;
+    const hasResumableDeposit = await DepositRequest.exists({ userId: id, status: DEPOSIT_STATUS.CREDIT_PENDING });
+    if (hasReservation || hasResumableDeposit || userWithReservations?.activeWalletOperation) {
+        throw new AppError('Wallet currency cannot change while a deposit approval is in progress.', 409, 'WALLET_CURRENCY_CHANGE_BLOCKED');
+    }
+
     // Validate new currency exists and is active
     const { Currency } = require('../currency/currency.model');
     const newCurrencyDoc = await Currency.findOne({ code, isActive: true });
@@ -334,13 +343,20 @@ const updateUserCurrency = async (id, currency, adminId) => {
     const previousBalance = user.walletBalance;
     const newBalance = convertBalance(previousBalance, oldRate, newRate);
 
-    // Atomic update — currency + balance together
     const previousCurrency = user.currency;
-    const updated = await User.findByIdAndUpdate(
-        id,
-        { $set: { currency: code, walletBalance: newBalance } },
-        { new: true }
-    ).populate('groupId', 'name percentage isActive');
+    await executeWalletOperation({
+        userId: id,
+        idempotencyKey: `currency-conversion:${id}:${oldCode}:${code}:${previousBalance}:${user.updatedAt?.toISOString?.() || 'legacy'}`,
+        operationType: 'CURRENCY_CONVERSION', transactionType: 'CREDIT',
+        amount: Math.abs(newBalance - previousBalance), delta: newBalance - previousBalance,
+        targetBalance: newBalance, expectedBalance: previousBalance, currency: oldCode,
+        targetCurrency: code, ledgerRequired: false,
+        description: `Wallet currency conversion ${oldCode} to ${code}`,
+        actorId: adminId, actorRole: ACTOR_ROLES.ADMIN, eventType: OUTBOX_EVENT.CURRENCY,
+        auditAction: require('../audit/audit.constants').WALLET_ACTIONS.CURRENCY_CONVERTED,
+        auditMetadata: { previousCurrency: oldCode, newCurrency: code, previousBalance, newBalance, oldRate, newRate },
+    });
+    const updated = await User.findById(id).populate('groupId', 'name percentage isActive');
 
     createAuditLog({
         actorId: adminId,

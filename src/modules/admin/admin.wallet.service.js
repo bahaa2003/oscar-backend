@@ -14,6 +14,8 @@ const { WalletTransaction, TRANSACTION_TYPES } = require('../wallet/walletTransa
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+const crypto = require('crypto');
+const { executeWalletOperation, OUTBOX_EVENT } = require('../wallet/walletOperation.service');
 
 const MAX_ADJUSTMENT = 100_000;  // guard against fat-finger typos
 
@@ -26,6 +28,9 @@ const safeRound = (value, decimals = 2) => {
     const factor = Math.pow(10, decimals);
     return Math.round(value * factor) / factor;
 };
+
+const stableAdminOperationKey = (userId, type, amount, reason, balanceBefore, callerKey) => callerKey
+    || `admin-wallet:${crypto.createHash('sha256').update(JSON.stringify([String(userId), type, amount, reason || '', balanceBefore])).digest('hex')}`;
 
 // ─── List wallets (summary of all users) ─────────────────────────────────────
 
@@ -95,7 +100,7 @@ const getTransactionHistory = async (userId, { page = 1, limit = 20 } = {}) => {
  *
  * No MongoDB transactions — uses atomic findOneAndUpdate + sequential create.
  */
-const addFunds = async (userId, amount, reason, adminId) => {
+const addFunds = async (userId, amount, reason, adminId, idempotencyKey = null) => {
     const parsedAmount = safeRound(Number(amount));
 
     if (parsedAmount <= 0 || parsedAmount > MAX_ADJUSTMENT) {
@@ -123,34 +128,15 @@ const addFunds = async (userId, amount, reason, adminId) => {
     const balanceAfter = safeRound(balanceBefore + parsedAmount);
     const creditUsedAfter = safeRound(creditUsedBefore - creditRepaid);
 
-    // Atomic update
-    await User.findByIdAndUpdate(userId, {
-        $set: {
-            walletBalance: balanceAfter,
-            creditUsed: creditUsedAfter,
-        },
-    });
-
-    // Create the wallet transaction record
-    const transaction = await WalletTransaction.create({
+    const result = await executeWalletOperation({
         userId,
-        type: TRANSACTION_TYPES.CREDIT,
-        amount: parsedAmount,
-        balanceBefore,
-        balanceAfter,
-        reference: null,
-        status: 'COMPLETED',
-        description: reason || `Admin manual credit (${userCurrency})`,
-    });
-
-    // Audit (fire-and-forget)
-    createAuditLog({
-        actorId: adminId,
-        actorRole: ACTOR_ROLES.ADMIN,
-        action: ADMIN_ACTIONS.WALLET_ADJUSTED,
-        entityType: ENTITY_TYPES.WALLET,
-        entityId: userId,
-        metadata: {
+        idempotencyKey: stableAdminOperationKey(userId, 'ADD', parsedAmount, reason, balanceBefore, idempotencyKey),
+        operationType: 'ADMIN_CREDIT', transactionType: TRANSACTION_TYPES.CREDIT,
+        amount: parsedAmount, delta: parsedAmount, targetBalance: balanceAfter, expectedBalance: balanceBefore,
+        creditUsedAfter, currency: userCurrency, description: reason || `Admin manual credit (${userCurrency})`,
+        actorId: adminId, actorRole: ACTOR_ROLES.ADMIN, eventType: OUTBOX_EVENT.ADMIN,
+        auditAction: require('../audit/audit.constants').WALLET_ACTIONS.ADMIN_BALANCE_ADJUSTMENT,
+        auditMetadata: {
             type: 'ADD',
             amount: parsedAmount,
             currency: userCurrency,
@@ -159,11 +145,9 @@ const addFunds = async (userId, amount, reason, adminId) => {
             balanceBefore,
             balanceAfter,
             creditRepaid,
-            transactionId: transaction._id,
         },
     });
-
-    return { transaction };
+    return { transaction: result.transaction };
 };
 
 /**
@@ -177,7 +161,7 @@ const addFunds = async (userId, amount, reason, adminId) => {
  *   Deduction allowed only if: amount <= available
  *   newBalance = walletBalance - amount (can go negative up to -creditLimit)
  */
-const deductFunds = async (userId, amount, reason, adminId) => {
+const deductFunds = async (userId, amount, reason, adminId, idempotencyKey = null) => {
     const parsedAmount = safeRound(Number(amount));
 
     if (parsedAmount <= 0 || parsedAmount > MAX_ADJUSTMENT) {
@@ -217,34 +201,15 @@ const deductFunds = async (userId, amount, reason, adminId) => {
     }
     const creditUsedAfter = safeRound(creditUsedBefore + creditDrawn);
 
-    // Atomic update
-    await User.findByIdAndUpdate(userId, {
-        $set: {
-            walletBalance: balanceAfter,
-            creditUsed: creditUsedAfter,
-        },
-    });
-
-    // Create the wallet transaction record
-    const transaction = await WalletTransaction.create({
+    const result = await executeWalletOperation({
         userId,
-        type: TRANSACTION_TYPES.DEBIT,
-        amount: parsedAmount,
-        balanceBefore,
-        balanceAfter,
-        reference: null,
-        status: 'COMPLETED',
-        description: reason || `Admin manual debit (${userCurrency})`,
-    });
-
-    // Audit (fire-and-forget)
-    createAuditLog({
-        actorId: adminId,
-        actorRole: ACTOR_ROLES.ADMIN,
-        action: ADMIN_ACTIONS.WALLET_ADJUSTED,
-        entityType: ENTITY_TYPES.WALLET,
-        entityId: userId,
-        metadata: {
+        idempotencyKey: stableAdminOperationKey(userId, 'DEDUCT', parsedAmount, reason, balanceBefore, idempotencyKey),
+        operationType: 'ADMIN_DEBIT', transactionType: TRANSACTION_TYPES.DEBIT,
+        amount: parsedAmount, delta: -parsedAmount, targetBalance: balanceAfter, expectedBalance: balanceBefore,
+        creditUsedAfter, currency: userCurrency, description: reason || `Admin manual debit (${userCurrency})`,
+        actorId: adminId, actorRole: ACTOR_ROLES.ADMIN, eventType: OUTBOX_EVENT.ADMIN,
+        auditAction: require('../audit/audit.constants').WALLET_ACTIONS.ADMIN_BALANCE_ADJUSTMENT,
+        auditMetadata: {
             type: 'DEDUCT',
             amount: parsedAmount,
             currency: userCurrency,
@@ -255,11 +220,9 @@ const deductFunds = async (userId, amount, reason, adminId) => {
             creditDrawn,
             creditUsedBefore,
             creditUsedAfter,
-            transactionId: transaction._id,
         },
     });
-
-    return { transaction };
+    return { transaction: result.transaction };
 };
 
 // ─── Admin Force Set Balance ──────────────────────────────────────────────────
@@ -271,7 +234,7 @@ const deductFunds = async (userId, amount, reason, adminId) => {
  * The amount parameter IS the desired new balance (can be negative).
  * Credit usage is recalculated based on the new balance.
  */
-const setBalance = async (userId, targetBalance, reason, adminId) => {
+const setBalance = async (userId, targetBalance, reason, adminId, idempotencyKey = null) => {
     const newBalance = safeRound(Number(targetBalance));
 
     if (!Number.isFinite(newBalance)) {
@@ -298,38 +261,20 @@ const setBalance = async (userId, targetBalance, reason, adminId) => {
         ? safeRound(Math.min(Math.abs(newBalance), creditLimit))
         : 0;
 
-    // Atomic update
-    await User.findByIdAndUpdate(userId, {
-        $set: {
-            walletBalance: newBalance,
-            creditUsed: creditUsedAfter,
-        },
-    });
-
     // Determine transaction type based on direction
     const delta = safeRound(newBalance - balanceBefore);
+    if (delta === 0) return { transaction: null, user: { walletBalance: newBalance, creditUsed: creditUsedAfter } };
     const txType = delta >= 0 ? TRANSACTION_TYPES.CREDIT : TRANSACTION_TYPES.DEBIT;
 
-    // Create the wallet transaction record
-    const transaction = await WalletTransaction.create({
+    const result = await executeWalletOperation({
         userId,
-        type: txType,
-        amount: safeRound(Math.abs(delta)),
-        balanceBefore,
-        balanceAfter: newBalance,
-        reference: null,
-        status: 'COMPLETED',
-        description: reason || `Admin set balance to ${newBalance} (${userCurrency})`,
-    });
-
-    // Audit (fire-and-forget)
-    createAuditLog({
-        actorId: adminId,
-        actorRole: ACTOR_ROLES.ADMIN,
-        action: ADMIN_ACTIONS.WALLET_ADJUSTED,
-        entityType: ENTITY_TYPES.WALLET,
-        entityId: userId,
-        metadata: {
+        idempotencyKey: stableAdminOperationKey(userId, 'SET', newBalance, reason, balanceBefore, idempotencyKey),
+        operationType: 'ADMIN_SET_BALANCE', transactionType: txType,
+        amount: safeRound(Math.abs(delta)), delta, targetBalance: newBalance, expectedBalance: balanceBefore,
+        creditUsedAfter, currency: userCurrency, description: reason || `Admin set balance to ${newBalance} (${userCurrency})`,
+        actorId: adminId, actorRole: ACTOR_ROLES.ADMIN, eventType: OUTBOX_EVENT.ADMIN,
+        auditAction: require('../audit/audit.constants').WALLET_ACTIONS.ADMIN_BALANCE_ADJUSTMENT,
+        auditMetadata: {
             type: 'SET',
             targetBalance: newBalance,
             delta,
@@ -339,11 +284,9 @@ const setBalance = async (userId, targetBalance, reason, adminId) => {
             balanceBefore,
             balanceAfter: newBalance,
             creditUsedAfter,
-            transactionId: transaction._id,
         },
     });
-
-    return { transaction, user: { walletBalance: newBalance, creditUsed: creditUsedAfter } };
+    return { transaction: result.transaction, user: { walletBalance: newBalance, creditUsed: creditUsedAfter } };
 };
 
 // ─── Bulk Debt Adjustment (Currency Devaluation) ─────────────────────────────
@@ -364,7 +307,7 @@ const setBalance = async (userId, targetBalance, reason, adminId) => {
  * @param {string}          [currencyCode] - ISO 4217 code to filter users by (e.g. 'EGP')
  * @returns {{ usersAdjusted, totalAdjustment, totalUsersInDebt, errors }}
  */
-const adjustNegativeBalancesForInflation = async (percentageIncrease, adminId, currencyCode = null) => {
+const adjustNegativeBalancesForInflation = async (percentageIncrease, adminId, currencyCode = null, idempotencyKey = crypto.randomUUID()) => {
     if (percentageIncrease <= 0 || percentageIncrease > 100) {
         throw new BusinessRuleError(
             'Percentage must be between 0.01 and 100.',
@@ -408,24 +351,14 @@ const adjustNegativeBalancesForInflation = async (percentageIncrease, adminId, c
                 ? safeRound(Math.min(Math.abs(balanceAfter), creditLimit))
                 : 0;
 
-            // Atomic balance update
-            await User.findByIdAndUpdate(user._id, {
-                $set: {
-                    walletBalance: balanceAfter,
-                    creditUsed: creditUsedAfter,
-                },
-            });
-
-            // Create auditable wallet transaction
-            await WalletTransaction.create({
-                userId: user._id,
-                type: TRANSACTION_TYPES.DEBT_ADJUSTMENT,
-                amount: adjustment,
-                balanceBefore,
-                balanceAfter,
-                reference: null,
-                status: 'COMPLETED',
+            await executeWalletOperation({
+                userId: user._id, idempotencyKey: `${idempotencyKey}:${user._id}`,
+                operationType: 'BULK_DEBT_INFLATION', transactionType: TRANSACTION_TYPES.DEBT_ADJUSTMENT,
+                amount: adjustment, delta: -adjustment, targetBalance: balanceAfter, expectedBalance: balanceBefore,
+                creditUsedAfter, currency: user.currency || 'USD',
                 description: `Debt adjustment due to ${currencyCode || 'currency'} rate increase (${percentageIncrease}%)`,
+                actorId: adminId, actorRole: ACTOR_ROLES.ADMIN, eventType: OUTBOX_EVENT.DEBT,
+                auditMetadata: { percentageIncrease, currencyCode, type: 'BULK_DEBT_ADJUSTMENT' },
             });
 
 
@@ -473,7 +406,7 @@ const adjustNegativeBalancesForInflation = async (percentageIncrease, adminId, c
  * @param {string}          [currencyCode] - ISO 4217 code to filter users by
  * @returns {{ usersAdjusted, totalAdjustment, totalUsersInDebt, errors }}
  */
-const adjustNegativeBalancesForDeflation = async (percentageDecrease, adminId, currencyCode = null) => {
+const adjustNegativeBalancesForDeflation = async (percentageDecrease, adminId, currencyCode = null, idempotencyKey = crypto.randomUUID()) => {
     if (percentageDecrease <= 0 || percentageDecrease > 100) {
         throw new BusinessRuleError(
             'Percentage must be between 0.01 and 100.',
@@ -516,24 +449,14 @@ const adjustNegativeBalancesForDeflation = async (percentageDecrease, adminId, c
                 ? safeRound(Math.min(Math.abs(balanceAfter), creditLimit))
                 : 0;
 
-            // Atomic balance update
-            await User.findByIdAndUpdate(user._id, {
-                $set: {
-                    walletBalance: balanceAfter,
-                    creditUsed: creditUsedAfter,
-                },
-            });
-
-            // Create auditable wallet transaction
-            await WalletTransaction.create({
-                userId: user._id,
-                type: TRANSACTION_TYPES.DEBT_ADJUSTMENT,
-                amount: adjustment,
-                balanceBefore,
-                balanceAfter,
-                reference: null,
-                status: 'COMPLETED',
+            await executeWalletOperation({
+                userId: user._id, idempotencyKey: `${idempotencyKey}:${user._id}`,
+                operationType: 'BULK_DEBT_DEFLATION', transactionType: TRANSACTION_TYPES.DEBT_ADJUSTMENT,
+                amount: adjustment, delta: adjustment, targetBalance: balanceAfter, expectedBalance: balanceBefore,
+                creditUsedAfter, currency: user.currency || 'USD',
                 description: `Debt relief due to ${currencyCode || 'currency'} rate decrease (${percentageDecrease}%)`,
+                actorId: adminId, actorRole: ACTOR_ROLES.ADMIN, eventType: OUTBOX_EVENT.DEBT,
+                auditMetadata: { percentageDecrease, currencyCode, type: 'BULK_DEBT_DEFLATION' },
             });
 
             usersAdjusted++;

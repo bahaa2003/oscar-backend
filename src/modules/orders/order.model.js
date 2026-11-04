@@ -1,6 +1,12 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const crypto = require('crypto');
+
+const ORDER_NUMBER_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const generateOrderNumber = () => Array.from({ length: 8 }, () => (
+    ORDER_NUMBER_ALPHABET[crypto.randomInt(ORDER_NUMBER_ALPHABET.length)]
+)).join('');
 
 const ORDER_STATUS = Object.freeze({
     PENDING: 'PENDING',
@@ -372,6 +378,16 @@ const orderSchema = new mongoose.Schema(
         timestamps: true,
     }
 );
+
+// `orderNumber` is documented as auto-assigned. Keep the unique index safe
+// for legacy callers that create Order documents directly as well as the
+// normal order service, which currently does not populate this field.
+orderSchema.pre('validate', function assignOrderNumber(next) {
+    if (!this.orderNumber) {
+        this.orderNumber = generateOrderNumber();
+    }
+    next();
+});
 
 // ─── Indexes ──────────────────────────────────────────────────────────────────
 

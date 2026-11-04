@@ -53,6 +53,8 @@ router.post('/restore', publishLimit, catchAsync(async (req, res) => sendSuccess
     await service.restore(req.user._id, req.body?.version), 'Theme restored')));
 router.get('/history', catchAsync(async (req, res) => sendSuccess(res,
     await service.history(Number(req.query.page || 1)))));
+router.post('/restore-draft', catchAsync(async (req, res) => sendSuccess(res,
+    await service.restoreToDraft(Number(req.body?.version)), 'Theme version loaded as draft')));
 router.get('/entitlement', catchAsync(async (_req, res) => {
     const state = await service.getStatus();
     return sendSuccess(res, { eligibility: state.eligibility, plan: service.plan, checkoutAvailable: false });

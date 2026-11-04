@@ -78,6 +78,9 @@ const auditLogSchema = new mongoose.Schema(
             default: null,
         },
 
+        /** Deterministic Outbox identity; absent on historical non-Outbox rows. */
+        eventId: { type: String, trim: true, default: null },
+
         /**
          * Structured JSON payload — arbitrary key/value data relevant to the event.
          *
@@ -132,6 +135,10 @@ auditLogSchema.index({ actorId: 1, createdAt: -1 });
  * Useful for compliance dashboards (all WALLET_DEBIT events, etc.)
  */
 auditLogSchema.index({ action: 1, createdAt: -1 });
+auditLogSchema.index(
+    { eventId: 1 },
+    { unique: true, partialFilterExpression: { eventId: { $type: 'string' } } }
+);
 
 // ─── Immutability Hook ────────────────────────────────────────────────────────
 

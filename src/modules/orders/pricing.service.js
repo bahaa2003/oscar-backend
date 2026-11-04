@@ -17,7 +17,7 @@
 const { User } = require('../users/user.model');
 const Group = require('../groups/group.model');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
-const { toDecimal, toStr, isPositive, multiply, add } = require('../../shared/utils/decimalPrecision');
+const { Decimal, isPositive, multiply, add, divide } = require('../../shared/utils/decimalPrecision');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PURE CALCULATION
@@ -37,7 +37,19 @@ const { toDecimal, toStr, isPositive, multiply, add } = require('../../shared/ut
  * @throws {BusinessRuleError} if inputs are invalid
  */
 const calculateFinalPrice = (basePrice, percentage) => {
-    const base = toDecimal(basePrice);
+    let base;
+    try {
+        if (basePrice === null || basePrice === undefined || String(basePrice).trim() === '') {
+            throw new Error('Missing base price');
+        }
+        base = new Decimal(String(basePrice));
+        if (!base.isFinite()) throw new Error('Invalid base price');
+    } catch (_error) {
+        throw new BusinessRuleError(
+            'basePrice must be a finite non-negative number.',
+            'INVALID_BASE_PRICE'
+        );
+    }
     if (base.isNegative()) {
         throw new BusinessRuleError(
             'basePrice must be a non-negative number.',
@@ -53,7 +65,7 @@ const calculateFinalPrice = (basePrice, percentage) => {
     }
 
     // basePrice + basePrice * (percentage / 100)
-    const markup = multiply(basePrice, String(pct / 100));
+    const markup = multiply(basePrice, divide(String(pct), '100'));
     return add(basePrice, markup);
 };
 

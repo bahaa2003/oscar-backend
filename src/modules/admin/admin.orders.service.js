@@ -407,6 +407,8 @@ const completeOrder = async (orderId, adminId, auditContext = null) => {
                 amount: reDeductAmount,
                 reference: order._id,
                 description: `Admin forced completion re-deduction for order #${order.orderNumber || order._id} (previously refunded ${reDeductAmount} ${order.currency || 'USD'})`,
+                actorId: ctx.actorId,
+                actorRole: ctx.actorRole,
             });
         }
 
