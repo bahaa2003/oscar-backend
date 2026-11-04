@@ -11,6 +11,7 @@ const jwt = require('jsonwebtoken');
 const { connectTestDB, disconnectTestDB, clearCollections, createCustomerWithGroup, createAdmin } = require('./testHelpers');
 const { ThemeSettings, ThemeHistory } = require('../modules/theme/theme.model');
 const { ThemeSubscription, ThemePayment, ThemeActivationCode, ThemeCodeUse } = require('../modules/theme/subscription.model');
+const PlatformThemeGrant = require('../modules/theme/theme.grant.model');
 const theme = require('../modules/theme/theme.service');
 const manualPayment = require('../modules/theme/manualPayment.service');
 const whatsappService = require('../modules/whatsapp/whatsapp.service');
@@ -336,6 +337,25 @@ const activatePlan = async (admin, planId = 'THEME_PRO') => {
     const activated = await manualPayment.redeemCode(admin._id, order.reference, issued.code);
     return { order, issued, activated };
 };
+
+test('owner ULTRA grant takes precedence over an existing PRO without changing its payment or subscription', async () => {
+    const admin = await createAdmin();
+    const activated = await activatePlan(admin, 'THEME_PRO');
+    const paymentBefore = await ThemePayment.findById(activated.order.paymentId).lean();
+    const subscriptionBefore = await ThemeSubscription.findOne({ verifiedPaymentId: paymentBefore._id }).lean();
+    const grant = await PlatformThemeGrant.create({ scopeKey: 'main', planId: 'THEME_ULTRA', status: 'ACTIVE',
+        grantedToUserId: admin._id, grantedByUserId: admin._id, reason: 'isolated test grant',
+        startsAt: new Date(Date.now() - 60_000), expiresAt: new Date(Date.now() + 86_400_000) });
+    expect((await theme.currentSubscription()).planId).toBe('THEME_PRO');
+    expect((await theme.currentEntitlement()).planId).toBe('THEME_ULTRA');
+    expect((await theme.getStatus()).eligibility.plan).toBe('THEME_ULTRA');
+    expect(await ThemePayment.findById(paymentBefore._id).lean()).toEqual(paymentBefore);
+    expect(await ThemeSubscription.findById(subscriptionBefore._id).lean()).toEqual(subscriptionBefore);
+    await PlatformThemeGrant.updateOne({ _id: grant._id }, { $set: { status: 'REVOKED' } });
+    expect((await theme.currentEntitlement()).planId).toBe('THEME_PRO');
+    expect(await ThemePayment.findById(paymentBefore._id).lean()).toEqual(paymentBefore);
+    expect(await ThemeSubscription.findById(subscriptionBefore._id).lean()).toEqual(subscriptionBefore);
+});
 
 test('Ultra direct purchase unlocks templates and retains Pro image-upload access', async () => {
     const admin = await createAdmin();

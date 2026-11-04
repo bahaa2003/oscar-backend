@@ -1,0 +1,31 @@
+# OSCAR owner theme grant persistence
+
+## Observed cause and evidence
+
+The OSCAR `main` revision `0d20866` did not contain `theme.grant.model.js` or `currentEntitlement()`. The owner supplied the model and the relevant service code from the server: the server has a `PlatformThemeGrant` model and grant-aware changes in `theme.service.js` that were absent from the Git repository. Replacing the server service with the repository version makes that version ignore the grant even when the MongoDB document still exists. A temporary isolated database experiment reproduced this: the grant survived reconnection unchanged, while the old service returned `FREE`. The actual production database, grant, server Git status and deployment history were not accessed; the particular cause of every historical incident remains unverified.
+
+## Data and compatibility
+
+The checked-in model uses the same Mongoose model name, collection mapping, fields, value enums and timestamps as the server model provided by the owner. The original unique partial and compound index definitions are documented in the schema; automatic index creation is disabled for this model so loading a new release does not change indexes or fail because of historical data. No migration, grant write, renewal, reset or activation job runs on startup.
+
+`currentEntitlement()` reads an existing grant only when `scopeKey=main`, `planId=THEME_ULTRA`, `status=ACTIVE`, the stored start/end interval is currently valid, `revokedAt` is null or absent, and `grantedToUserId` resolves to an active administrator. Those checks do not mutate the document. The stored beneficiary is the authoritative owner reference; the runtime does not use `THEME_GRANT_OWNER_ID`, so changing or omitting that variable does not rewrite, replace or grant anything. Grant status, recipient, issuer, start, end, and timestamps remain untouched.
+
+An active grant takes priority over a concurrent paid PRO or ULTRA entitlement, so a shorter paid plan cannot mask the owner's existing ULTRA. Without a valid owner grant, the existing verified-payment subscription checks run unchanged. Payment/subscription records and manual-payment algorithms are not rewritten. Grant entitlement is platform-wide, consistent with the existing `scopeKey=main` architecture and server code; theme administration endpoints still require an authenticated administrator. The account in the production grant was not inspected, so its identity, active status and expiry must be confirmed using the operator's existing authorized procedures.
+
+`getStatus()` and transactional theme publication use the same entitlement lookup. Image upload and ULTRA WhatsApp settings already use `getStatus()`. Eligibility's existing subscription data now includes `status: ACTIVE` when a currently valid entitlement exists; its original `startsAt` and `expiresAt` are returned unchanged.
+
+## Isolated tests
+
+- `npm test -- --runTestsByPath src/tests/themeGrant.test.js src/tests/theme.test.js` verifies owner grant detection, unchanged grant dates, API, real upload and publication, expired/not-yet-started/revoked grants, inactive/missing/non-admin beneficiaries, existing payment behavior and grant precedence over PRO using only a disposable database.
+- `node scripts/test-theme-grant-deployment.cjs` needs `OSCAR_TEST_PM2_CLI` pointing to an installed PM2 CLI. The script creates a fresh temporary one-node MongoDB replica set, a temporary bare Git repository and release directories, and a unique temporary `PM2_HOME`. It verifies two real PM2 restarts (new process IDs), a real `git pull`, replacement of the release directory, grant contents/dates/count, API eligibility, publishing and real image upload. No production process, environment file, payment or subscription is used. Its fixture release has no `.env` or activation script; the isolated PM2 process receives its test MongoDB URI through its own environment. It cleans only its own temporary release directories, PM2 app/daemon and MongoDB instance.
+- Recorded result: the complete backend suite passed 25 suites / 764 tests. Focused theme and grant tests passed, including verified PRO compatibility. The isolated PM2 deployment runner passed all restart, pull, directory replacement, publish and upload checks. Node syntax and `git diff --check` passed. Production PM2, server reboot and production MongoDB contents/topology were not tested.
+
+## Deployment requirements and limits
+
+The repository now contains the model and service integration, so normal future code updates retain the integration. The MongoDB instance and database named by `MONGO_URI` must themselves be persistent and accessible with stable credentials. Deleting both the environment file and all process-manager/environment configuration can prevent the application connecting to any database; code cannot recover an unknown MongoDB URI. Preserve the server configuration outside a replaced release directory or provide it persistently through the process manager. No current server environment or PM2 configuration was inspected or changed.
+
+Uploaded theme images and other customer uploads are files in the backend's `uploads` directory, separate from the MongoDB grant. If deployments replace that directory without preserving it, previously uploaded images or receipts can disappear even though the grant persists. Preserve the existing uploads directory during release replacement; this change does not move or delete it.
+
+Theme publication already uses MongoDB transactions and therefore needs a transaction-capable deployment (for example a replica set). The isolated deployment test used a one-node replica set; the production MongoDB topology was not inspected.
+
+The owner reported a server-only `theme.grant.model.js` and a modified `theme.service.js`. A normal `git pull` can refuse to overwrite local modifications or an untracked model file. Before first rollout, inspect `git status --short` and the service diff; preserve any unrelated server changes and back up those files before reconciling them with the committed versions. Do not use seed/reset operations to resolve a deployment conflict. The code alone cannot prove that production is connected to the same database, that the existing grant has the expected owner/date, or that an external deployment process preserves configuration.

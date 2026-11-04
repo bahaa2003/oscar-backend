@@ -3,6 +3,8 @@
 const mongoose = require('mongoose');
 const { ThemeSettings, ThemeHistory } = require('./theme.model');
 const { ThemeSubscription, ThemePayment } = require('./subscription.model');
+const PlatformThemeGrant = require('./theme.grant.model');
+const { User, ROLES, USER_STATUS } = require('../users/user.model');
 const { validateTheme, safeTheme, preset, allowed, assertPlanAllows, FREE_PRESETS, PRO_PRESETS } = require('./theme.validation');
 const { AppError, NotFoundError } = require('../../shared/errors/AppError');
 
@@ -47,6 +49,22 @@ async function currentSubscription(now = new Date(), session = null) {
     return subscription;
 }
 
+// A persisted owner grant is independent of payment records and activation
+// scripts. It grants the platform ULTRA only while its recorded beneficiary is
+// an active admin and its original validity interval is still open.
+async function currentEntitlement(now = new Date(), session = null) {
+    const grant = await PlatformThemeGrant.findOne({
+        scopeKey: SCOPE_KEY, planId: 'THEME_ULTRA', status: 'ACTIVE',
+        startsAt: { $lte: now }, expiresAt: { $gt: now }, revokedAt: null,
+    }).session(session).lean();
+    if (grant?.grantedToUserId && await User.exists({
+        _id: grant.grantedToUserId, role: ROLES.ADMIN, status: USER_STATUS.ACTIVE,
+    }).session(session)) {
+        return { planId: grant.planId, startsAt: grant.startsAt, expiresAt: grant.expiresAt, isOwnerGrant: true };
+    }
+    return currentSubscription(now, session);
+}
+
 const freeHistoryQuery = { scopeKey: SCOPE_KEY, $or: [{ planId: 'FREE' }, { planId: { $exists: false } }] };
 
 function eligibility(settings, subscription, now = new Date(), freeChangesUsed = 0) {
@@ -61,7 +79,7 @@ function eligibility(settings, subscription, now = new Date(), freeChangesUsed =
         lastSuccessfulPublishAt: last,
         nextFreeEditAt,
         remainingMs: paid || !nextFreeEditAt ? 0 : Math.max(0, nextFreeEditAt.getTime() - now.getTime()),
-        subscription: subscription ? { startsAt: subscription.startsAt, expiresAt: subscription.expiresAt,
+        subscription: subscription ? { status: 'ACTIVE', startsAt: subscription.startsAt, expiresAt: subscription.expiresAt,
             daysRemaining: Math.ceil((new Date(subscription.expiresAt).getTime() - now.getTime()) / 86400000) } : null,
     };
 }
@@ -69,7 +87,7 @@ function eligibility(settings, subscription, now = new Date(), freeChangesUsed =
 async function getStatus() {
     const now = new Date();
     const [settings, subscription, freeChangesUsed] = await Promise.all([
-        ThemeSettings.findOne({ scopeKey: SCOPE_KEY }).lean(), currentSubscription(now),
+        ThemeSettings.findOne({ scopeKey: SCOPE_KEY }).lean(), currentEntitlement(now),
         ThemeHistory.countDocuments(freeHistoryQuery),
     ]);
     return { settings, eligibility: eligibility(settings, subscription, now, freeChangesUsed) };
@@ -121,7 +139,7 @@ async function publish(actorId, value, operation = 'PUBLISH') {
                     { $inc: { writeLock: 1 }, $setOnInsert: { scopeKey: SCOPE_KEY } },
                     { upsert: true, new: true, session });
                 const now = new Date();
-                const subscription = await currentSubscription(now, session);
+                const subscription = await currentEntitlement(now, session);
                 const freeChangesUsed = await ThemeHistory.countDocuments(freeHistoryQuery).session(session);
                 const access = eligibility(record, subscription, now, freeChangesUsed);
                 assertPlanAllows(theme, subscription?.planId || 'FREE');
@@ -170,4 +188,4 @@ function presets() {
 }
 
 module.exports = { settings, published, getStatus, saveDraft, resetDraft, restoreToDraft, publish, restore, history, presets,
-    validateTheme, eligibility, currentSubscription, addCalendarMonthsUTC, plan, plans, allowed, SCOPE_KEY };
+    validateTheme, eligibility, currentSubscription, currentEntitlement, addCalendarMonthsUTC, plan, plans, allowed, SCOPE_KEY };
