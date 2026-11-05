@@ -412,14 +412,16 @@ test('ULTRA header, bottom navigation, and sidebar publish through the public th
     await activatePlan(admin, 'THEME_ULTRA');
     const configuration = preset('gold');
     configuration.brand.sidebarTemplate = 'aurora';
-    configuration.chrome.modes.light.header = { ...configuration.chrome.modes.light.header, template: 'floating', height: 88,
-        width: 92, background: '#FFFFFF', foreground: '#0F172A', accent: '#2563EB', radius: 16 };
-    configuration.chrome.modes.dark.header = { ...configuration.chrome.modes.dark.header, template: 'floating', height: 88,
-        width: 92, background: '#0F172A', foreground: '#F8FAFC', accent: '#60A5FA', radius: 16 };
+    configuration.chrome.modes.light.header = { ...configuration.chrome.modes.light.header, template: 'floating', height: 120,
+        width: 60, background: '#FFFFFF', foreground: '#0F172A', accent: '#2563EB', radius: 20 };
+    configuration.chrome.modes.dark.header = { ...configuration.chrome.modes.dark.header, template: 'floating', height: 48,
+        width: 100, background: '#0F172A', foreground: '#F8FAFC', accent: '#60A5FA', radius: 28 };
     configuration.chrome.header = configuration.chrome.modes.light.header;
-    configuration.chrome.modes.light.bottomNav = { ...configuration.chrome.modes.light.bottomNav, template: 'pill', height: 72,
-        width: 88, background: '#FFFFFF', foreground: '#0F172A', accent: '#2563EB', radius: 24 };
+    configuration.chrome.modes.light.bottomNav = { ...configuration.chrome.modes.light.bottomNav, template: 'pill', height: 100,
+        width: 60, background: '#FFFFFF', foreground: '#0F172A', accent: '#2563EB', radius: 28 };
     configuration.chrome.bottomNav = configuration.chrome.modes.light.bottomNav;
+    configuration.chrome.modes.dark.bottomNav = { ...configuration.chrome.modes.dark.bottomNav, template: 'floating', height: 48,
+        width: 100, background: '#0F172A', foreground: '#F8FAFC', accent: '#60A5FA', radius: 20 };
 
     const published = await request('/api/admin/theme/publish', admin, 'POST', configuration);
     expect(published.status).toBe(200);
@@ -427,14 +429,15 @@ test('ULTRA header, bottom navigation, and sidebar publish through the public th
     expect(publicTheme.data.published).toMatchObject({
         brand: { sidebarTemplate: 'aurora' },
         chrome: {
-            header: expect.objectContaining({ template: 'floating', height: 88, width: 92, radius: 16 }),
-            bottomNav: expect.objectContaining({ template: 'pill', height: 72, width: 88, radius: 24 }),
+            header: expect.objectContaining({ template: 'floating', height: 120, width: 60, radius: 20 }),
+            bottomNav: expect.objectContaining({ template: 'pill', height: 100, width: 60, radius: 28 }),
             modes: {
-                light: { header: expect.objectContaining({ background: '#FFFFFF' }) },
-                dark: { header: expect.objectContaining({ background: '#0F172A', foreground: '#F8FAFC' }) },
+                light: { header: expect.objectContaining({ background: '#FFFFFF', height: 120, width: 60, radius: 20 }) },
+                dark: { header: expect.objectContaining({ background: '#0F172A', foreground: '#F8FAFC', height: 48, width: 100, radius: 28 }) },
             },
         },
     });
+    expect(publicTheme.data.published.chrome.modes.dark.bottomNav).toMatchObject({ height: 48, width: 100, radius: 20 });
 });
 
 test('Pro upgrades for 5 USDT, keeps the original expiry and returns Ultra entitlement', async () => {

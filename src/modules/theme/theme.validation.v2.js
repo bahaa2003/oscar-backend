@@ -163,8 +163,8 @@ function validateTheme(value) {
         // light-mode edit to overwrite the dark-mode configuration.
         const legacyInput = inputChromeModes ? {} : inputChrome;
         chromeModes[mode] = {
-            header: validateChromePart(legacyInput.header || modeInput.header || baseChromeModes[mode].header, `chrome.${mode}.header`, ['bar', 'floating'], [0, 4, 8, 12, 16, 24, 32], [48, 120], [60, 100]),
-            bottomNav: validateChromePart(legacyInput.bottomNav || modeInput.bottomNav || baseChromeModes[mode].bottomNav, `chrome.${mode}.bottomNav`, ['bar', 'floating', 'pill'], [0, 4, 8, 12, 16, 24, 32], [48, 100], [60, 100]),
+            header: validateChromePart(legacyInput.header || modeInput.header || baseChromeModes[mode].header, `chrome.${mode}.header`, ['bar', 'floating'], [0, 4, 8, 12, 16, 20, 24, 28, 32], [48, 120], [60, 100]),
+            bottomNav: validateChromePart(legacyInput.bottomNav || modeInput.bottomNav || baseChromeModes[mode].bottomNav, `chrome.${mode}.bottomNav`, ['bar', 'floating', 'pill'], [0, 4, 8, 12, 16, 20, 24, 28, 32], [48, 100], [60, 100]),
         };
     }
     const chrome = { header: chromeModes.light.header, bottomNav: chromeModes.light.bottomNav, modes: chromeModes };
