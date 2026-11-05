@@ -228,6 +228,12 @@ test('strict dual-mode validation rejects injection and unsafe fields but permit
     expect(validatedColors.modes.dark.colors.text).toBe('#000000');
     expect(validatedColors.chrome.modes.light.header.foreground).toBe('#FFFFFF');
     expect(validatedColors.chrome.modes.dark.bottomNav.foreground).toBe('#000000');
+    const beforeSidebarNeon = preset('classic');
+    delete beforeSidebarNeon.modes.light.neon.sidebar;
+    delete beforeSidebarNeon.modes.dark.neon.sidebar;
+    const migratedTheme = validateTheme(beforeSidebarNeon);
+    expect(migratedTheme.modes.light.neon.sidebar).toEqual({ enabled: false, color: '#F472B6', speed: 5 });
+    expect(migratedTheme.modes.dark.neon.sidebar).toEqual({ enabled: false, color: '#F472B6', speed: 5 });
     expect(() => validateTheme({ ...base, brand: { ...base.brand, logoPath: 'javascript:alert(1)' } })).toThrow();
     expect(safeTheme({ bad: true })).toEqual(preset('classic'));
     const customText = preset('classic');
@@ -736,6 +742,9 @@ test('verified Pro admin can upload and publish a logo with a premium preset', a
         configuration.brand.marqueeTextArabic = 'مرحبًا بك في عروض المنصة';
         configuration.modes.light.typography.arabicFont = 'Changa';
         configuration.modes.light.neon.purchase = { enabled: true, color: '#FF00CC', speed: 3 };
+        configuration.modes.light.neon.sidebar = { enabled: true, color: '#22CC88', speed: 8 };
+        configuration.modes.dark.neon.purchase = { enabled: false, color: '#124578', speed: 12 };
+        configuration.modes.dark.neon.sidebar = { enabled: false, color: '#AABBCC', speed: 3 };
         configuration.modes.dark.neon.categories = { enabled: true, color: '#00FFAA', speed: 8 };
         configuration.modes.dark.neon.categoryCards['507f1f77bcf86cd799439011'] = { enabled: true, color: '#F0A500', speed: 12 };
         expect((await request('/api/admin/theme/publish', admin, 'POST', configuration)).status).toBe(200);
@@ -747,6 +756,14 @@ test('verified Pro admin can upload and publish a logo with a premium preset', a
         expect((await theme.published()).published.modes.dark.neon.categories).toEqual({ enabled: true, color: '#00FFAA', speed: 8 });
         expect((await theme.published()).published.modes.dark.neon.categoryCards['507f1f77bcf86cd799439011'])
             .toEqual({ enabled: true, color: '#F0A500', speed: 12 });
+        expect((await theme.published()).published.modes.light.neon.purchase)
+            .toEqual({ enabled: true, color: '#FF00CC', speed: 3 });
+        expect((await theme.published()).published.modes.light.neon.sidebar)
+            .toEqual({ enabled: true, color: '#22CC88', speed: 8 });
+        expect((await theme.published()).published.modes.dark.neon.purchase)
+            .toEqual({ enabled: false, color: '#124578', speed: 12 });
+        expect((await theme.published()).published.modes.dark.neon.sidebar)
+            .toEqual({ enabled: false, color: '#AABBCC', speed: 3 });
     } finally {
         await fs.unlink(path.join(__dirname, '../..', logoPath.replace(/^\//, ''))).catch(() => undefined);
     }

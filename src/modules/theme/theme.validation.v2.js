@@ -40,8 +40,8 @@ const baseButtons = { radius: 8, style: 'solid' };
 const baseCards = { radius: 12, shadow: 'subtle' };
 const baseNavigation = { style: 'standard' };
 const DEFAULT_MARQUEE_AR = 'بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ ﴿قُلْ إِنَّ رَبِّي يَبْسُطُ الرِّزْقَ لِمَنْ يَشَاءُ مِنْ عِبَادِهِ وَيَقْدِرُ لَهُ وَمَا أَنْفَقْتُمْ مِنْ شَيْءٍ فَهُوَ يُخْلِفُهُ وَهُوَ خَيْرُ الرَّازِقِينَ﴾ صَدَقَ اللَّهُ الْعَظِيمُ';
-const neonSections = ['purchase', 'hero', 'categories', 'bestSellers'];
-const neonColors = { purchase: '#22D3EE', hero: '#A855F7', categories: '#34D399', bestSellers: '#F59E0B' };
+const neonSections = ['purchase', 'hero', 'categories', 'bestSellers', 'sidebar'];
+const neonColors = { purchase: '#22D3EE', hero: '#A855F7', categories: '#34D399', bestSellers: '#F59E0B', sidebar: '#F472B6' };
 const baseNeon = () => ({ ...Object.fromEntries(neonSections.map((section) =>
     [section, { enabled: false, color: neonColors[section], speed: 5 }])), categoryCards: {} });
 const chromePart = (mode) => ({
@@ -100,7 +100,9 @@ function validateAppearance(value, path) {
     keysOnly(neon, [...neonSections, 'categoryCards'], `${path}.neon`);
     result.neon = {};
     for (const section of neonSections) {
-        const effect = neon[section];
+        // Neon sections added in newer releases default off for stored themes
+        // created before the section existed.
+        const effect = neon[section] ?? { enabled: false, color: neonColors[section], speed: 5 };
         keysOnly(effect, ['enabled','color','speed'], `${path}.neon.${section}`);
         if (typeof effect.enabled !== 'boolean' || typeof effect.color !== 'string'
             || !/^#[0-9a-f]{6}$/i.test(effect.color) || ![3,5,8,12].includes(effect.speed)) {
