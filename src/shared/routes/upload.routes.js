@@ -18,6 +18,8 @@ const requirePermission = require('../middlewares/requirePermission');
 const { createUpload } = require('../middlewares/upload');
 const { BusinessRuleError } = require('../errors/AppError');
 const { sendSuccess } = require('../utils/apiResponse');
+const fs = require('fs/promises');
+const optimizeStorefrontImage = require('../services/optimizeStorefrontImage');
 
 const router = Router();
 
@@ -53,7 +55,7 @@ router.post('/:category', (req, res, next) => {
 }, (req, res, next) => {
     const { category } = req.params;
     const upload = createUpload(category);
-    upload.single('image')(req, res, (err) => {
+    upload.single('image')(req, res, async (err) => {
         if (err) return next(err);
 
         if (!req.file) {
@@ -62,8 +64,14 @@ router.post('/:category', (req, res, next) => {
             );
         }
 
-        const relativePath = `/uploads/${category}/${req.file.filename}`;
-        sendSuccess(res, { path: relativePath }, 'Image uploaded successfully.');
+        try {
+            const file = category === 'payments' ? req.file : await optimizeStorefrontImage(req.file);
+            const relativePath = `/uploads/${category}/${file.filename}`;
+            return sendSuccess(res, { path: relativePath }, 'Image uploaded successfully.');
+        } catch (error) {
+            await fs.unlink(req.file.path).catch(() => {});
+            return next(error);
+        }
     });
 });
 
