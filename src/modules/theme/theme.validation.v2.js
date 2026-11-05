@@ -66,8 +66,6 @@ const validateChromePart = (value, path, templateValues, radiusValues, heightRan
     for (const key of ['background', 'foreground', 'accent']) {
         if (typeof value[key] !== 'string' || !/^#[0-9a-f]{6}$/i.test(value[key])) invalid(`${path}.${key}`);
     }
-    if (contrast(value.foreground.toUpperCase(), value.background.toUpperCase()) < 4.5
-        || contrast(value.accent.toUpperCase(), value.background.toUpperCase()) < 2.2) invalid(`${path}.contrast`);
     return { template: value.template, height: value.height, width: value.width,
         background: value.background.toUpperCase(), foreground: value.foreground.toUpperCase(),
         accent: value.accent.toUpperCase(), radius: value.radius };
@@ -77,10 +75,6 @@ const invalid = (field) => { throw new ValidationError(`Invalid theme property: 
 const plain = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
     && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 const keysOnly = (value, keys, path) => { if (!plain(value)) invalid(path); for (const key of Object.keys(value)) if (!keys.includes(key)) invalid(`${path}.${key}`); };
-const luminance = (hex) => [1,3,5].map((start) => parseInt(hex.slice(start,start+2),16)/255)
-    .map((x) => x <= 0.04045 ? x/12.92 : ((x+0.055)/1.055)**2.4)
-    .reduce((sum,x,i) => sum + x*[0.2126,0.7152,0.0722][i],0);
-const contrast = (a,b) => (Math.max(luminance(a),luminance(b))+0.05)/(Math.min(luminance(a),luminance(b))+0.05);
 const appearance = (id, mode) => ({ presetId: id, colors: Object.fromEntries(colorKeys.map((key,i) => [key,palettes[id][mode][i]])),
     typography: { ...baseTypography }, buttons: { ...baseButtons }, cards: { ...baseCards }, navigation: { ...baseNavigation }, neon: baseNeon() });
 
@@ -93,8 +87,6 @@ function validateAppearance(value, path) {
         if (typeof value.colors[key] !== 'string' || !/^#[0-9a-f]{6}$/i.test(value.colors[key])) invalid(`${path}.colors.${key}`);
         colors[key] = value.colors[key].toUpperCase();
     }
-    if (contrast(colors.text,colors.background)<4.5 || contrast(colors.text,colors.surface)<4.5
-        || contrast(colors.mutedText,colors.background)<4.5) invalid(`${path}.colors.contrast`);
     const result = { presetId: value.presetId, colors };
     for (const section of ['typography','buttons','cards','navigation']) {
         keysOnly(value[section],Object.keys(allowed[section]),`${path}.${section}`);
@@ -163,13 +155,13 @@ function validateTheme(value) {
     if (inputChromeModes !== undefined) keysOnly(inputChromeModes, ['light', 'dark'], 'chrome.modes');
     const baseChromeModes = baseChrome().modes;
     const chromeModes = {};
-    const rootChromeOverridesModes = Boolean(inputChromeModes && (
-        (inputChrome.header && JSON.stringify(inputChrome.header) !== JSON.stringify(inputChromeModes.light?.header))
-        || (inputChrome.bottomNav && JSON.stringify(inputChrome.bottomNav) !== JSON.stringify(inputChromeModes.light?.bottomNav))));
     for (const mode of ['light', 'dark']) {
         const modeInput = inputChromeModes?.[mode] || {};
         keysOnly(modeInput, ['header', 'bottomNav'], `chrome.${mode}`);
-        const legacyInput = !inputChromeModes || rootChromeOverridesModes ? inputChrome : {};
+        // When mode-specific values exist, they are authoritative. The root
+        // aliases are retained only for schema-v1 clients and must not cause a
+        // light-mode edit to overwrite the dark-mode configuration.
+        const legacyInput = inputChromeModes ? {} : inputChrome;
         chromeModes[mode] = {
             header: validateChromePart(legacyInput.header || modeInput.header || baseChromeModes[mode].header, `chrome.${mode}.header`, ['bar', 'floating'], [0, 4, 8, 12, 16, 24, 32], [48, 120], [60, 100]),
             bottomNav: validateChromePart(legacyInput.bottomNav || modeInput.bottomNav || baseChromeModes[mode].bottomNav, `chrome.${mode}.bottomNav`, ['bar', 'floating', 'pill'], [0, 4, 8, 12, 16, 24, 32], [48, 100], [60, 100]),

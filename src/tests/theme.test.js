@@ -207,15 +207,27 @@ test('a pending payment cannot grant Theme Pro even if a subscription row says a
     expect((await theme.getStatus()).eligibility.plan).toBe('FREE');
 });
 
-test('strict dual-mode validation rejects injection, unknown keys, unsafe fonts and poor contrast', () => {
+test('strict dual-mode validation rejects injection and unsafe fields but permits custom color contrast', () => {
     expect(() => validateTheme({ ...preset('classic'), isAdmin: true })).toThrow();
     const base = preset('classic');
     expect(() => validateTheme({ ...base, modes: { ...base.modes, dark: { ...base.modes.dark,
         typography: { ...base.modes.dark.typography, englishFont: 'url(javascript:alert(1))' } } } })).toThrow();
     expect(() => validateTheme({ ...base, modes: { ...base.modes, light: { ...base.modes.light,
         colors: { ...base.modes.light.colors, primary: 'red; background:url(x)' } } } })).toThrow();
-    expect(() => validateTheme({ ...base, modes: { ...base.modes, light: { ...base.modes.light,
-        colors: { ...base.modes.light.colors, text: '#FFFFFF' } } } })).toThrow();
+    const customContrast = { ...base, modes: { ...base.modes,
+        light: { ...base.modes.light, colors: { ...base.modes.light.colors, text: '#FFFFFF' } },
+        dark: { ...base.modes.dark, colors: { ...base.modes.dark.colors, text: '#000000' } },
+    }, chrome: { ...base.chrome, modes: {
+        light: { ...base.chrome.modes.light, header: { ...base.chrome.modes.light.header,
+            background: '#FFFFFF', foreground: '#FFFFFF', accent: '#FFFFFF' } },
+        dark: { ...base.chrome.modes.dark, bottomNav: { ...base.chrome.modes.dark.bottomNav,
+            background: '#000000', foreground: '#000000', accent: '#000000' } },
+    } } };
+    const validatedColors = validateTheme(customContrast);
+    expect(validatedColors.modes.light.colors.text).toBe('#FFFFFF');
+    expect(validatedColors.modes.dark.colors.text).toBe('#000000');
+    expect(validatedColors.chrome.modes.light.header.foreground).toBe('#FFFFFF');
+    expect(validatedColors.chrome.modes.dark.bottomNav.foreground).toBe('#000000');
     expect(() => validateTheme({ ...base, brand: { ...base.brand, logoPath: 'javascript:alert(1)' } })).toThrow();
     expect(safeTheme({ bad: true })).toEqual(preset('classic'));
     const customText = preset('classic');
@@ -223,6 +235,28 @@ test('strict dual-mode validation rejects injection, unknown keys, unsafe fonts 
     expect(validateTheme(customText).brand.marqueeTextArabic).toBe('أهلاً بك في المنصة');
     expect(() => validateTheme({ ...customText, brand: { ...customText.brand,
         marqueeTextArabic: '<script>أهلاً</script>' } })).toThrow();
+});
+
+test('custom light and dark color combinations are accepted and saved independently over HTTP', async () => {
+    const admin = await createAdmin();
+    const configuration = preset('classic');
+    configuration.modes.light.colors.background = '#FAEBD7';
+    configuration.modes.light.colors.text = '#F5DEB3';
+    configuration.modes.dark.colors.background = '#18202A';
+    configuration.modes.dark.colors.text = '#243447';
+    configuration.chrome.modes.light.header.background = '#FFFFFF';
+    configuration.chrome.modes.light.header.foreground = '#FFFFFF';
+    configuration.chrome.modes.dark.header.background = '#000000';
+    configuration.chrome.modes.dark.header.foreground = '#000000';
+
+    const response = await request('/api/admin/theme/draft', admin, 'POST', configuration);
+    expect(response.status).toBe(200);
+    expect(response.body.data.draft.modes.light.colors.background).toBe('#FAEBD7');
+    expect(response.body.data.draft.modes.light.colors.text).toBe('#F5DEB3');
+    expect(response.body.data.draft.modes.dark.colors.background).toBe('#18202A');
+    expect(response.body.data.draft.modes.dark.colors.text).toBe('#243447');
+    expect(response.body.data.draft.chrome.modes.light.header.foreground).toBe('#FFFFFF');
+    expect(response.body.data.draft.chrome.modes.dark.header.foreground).toBe('#000000');
 });
 
 test('ordinary users can see only the published platform theme', async () => {
