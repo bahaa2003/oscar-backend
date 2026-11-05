@@ -5,7 +5,7 @@ const { ThemeSettings, ThemeHistory } = require('./theme.model');
 const { ThemeSubscription, ThemePayment } = require('./subscription.model');
 const PlatformThemeGrant = require('./theme.grant.model');
 const { User, ROLES, USER_STATUS } = require('../users/user.model');
-const { validateTheme, safeTheme, preset, allowed, assertPlanAllows, FREE_PRESETS, PRO_PRESETS } = require('./theme.validation');
+const { validateTheme, safeTheme, preset, presetTier, allowed, assertPlanAllows, FREE_PRESETS, PRO_PRESETS, ULTRA_PRESETS } = require('./theme.validation');
 const { AppError, NotFoundError } = require('../../shared/errors/AppError');
 
 const COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000;
@@ -183,8 +183,7 @@ async function history(page = 1) {
 }
 
 function presets() {
-    return [...FREE_PRESETS.map((id) => ({ id, tier: 'FREE', configuration: preset(id) })),
-        ...PRO_PRESETS.map((id) => ({ id, tier: 'THEME_PRO', configuration: preset(id) }))];
+    return [...FREE_PRESETS, ...PRO_PRESETS].map((id) => ({ id, tier: presetTier(id), requiresUltra: ULTRA_PRESETS.includes(id), configuration: preset(id) }));
 }
 
 module.exports = { settings, published, getStatus, saveDraft, resetDraft, restoreToDraft, publish, restore, history, presets,

@@ -1,13 +1,34 @@
 'use strict';
 
 const { ValidationError, AppError } = require('../../shared/errors/AppError');
-const FREE_FONTS_AR = ['Cairo', 'Tajawal'];
+const FREE_FONTS_AR = ['Cairo', 'Tajawal', 'Aref Ruqaa', 'Aref Ruqaa Ink', 'Noto Kufi Arabic', 'El Messiri'];
 const PRO_FONTS_AR = ['Noto Sans Arabic', 'Almarai', 'Changa', 'IBM Plex Sans Arabic', 'Rubik'];
 const FREE_FONTS_EN = ['Inter', 'Arial'];
 const PRO_FONTS_EN = ['Roboto', 'Poppins', 'Montserrat', 'Outfit', 'Plus Jakarta Sans'];
 const FREE_PRESETS = ['classic', 'midnight', 'warm'];
 const PRO_PRESETS = ['ocean', 'forest', 'royal', 'sunset', 'graphite',
     'gold', 'silver', 'copper', 'ruby', 'orchid', 'aurora', 'desert', 'frost'];
+// Keep PRO template tiers compatible with the existing contract. Only these
+// templates include header, bottom navigation, and sidebar customization.
+const ULTRA_PRESETS = ['royal', 'aurora'];
+const presetDesigns = {
+    classic: { layout: [4, 3, 2, 2], logoWidth: 144 },
+    midnight: { layout: [3, 2, 2, 2], logoWidth: 144 },
+    warm: { layout: [4, 3, 2, 2], logoWidth: 144 },
+    ocean: { layout: [5, 3, 2, 2], logoWidth: 160, font: 'Noto Sans Arabic', weight: 800, buttonRadius: 12, cardRadius: 16, shadow: 'medium', neon: ['hero', 'categories'], header: ['bar', 62, 100, 0], bottomNav: ['floating', 66, 94, 18], sidebar: ['glass', 280, 96, 24] },
+    forest: { layout: [4, 2, 2, 1], logoWidth: 152, font: 'El Messiri', weight: 800, buttonRadius: 12, cardRadius: 24, shadow: 'subtle', neon: ['categories'], header: ['floating', 70, 94, 22], bottomNav: ['pill', 70, 90, 24], sidebar: ['aurora', 278, 94, 32] },
+    royal: { layout: [4, 3, 2, 2], logoWidth: 172, font: 'Changa', weight: 900, buttonRadius: 12, cardRadius: 24, shadow: 'medium', neon: ['hero', 'bestSellers'], header: ['floating', 74, 92, 28], bottomNav: ['pill', 74, 90, 28], sidebar: ['royal', 296, 96, 36] },
+    sunset: { layout: [4, 3, 2, 2], logoWidth: 160, font: 'Almarai', weight: 800, buttonRadius: 12, cardRadius: 16, shadow: 'medium', neon: ['purchase', 'hero'], header: ['floating', 68, 96, 20], bottomNav: ['floating', 68, 94, 20], sidebar: ['default', 270, 94, 24] },
+    graphite: { layout: [5, 3, 3, 2], logoWidth: 152, font: 'Noto Kufi Arabic', weight: 800, buttonRadius: 8, cardRadius: 12, shadow: 'subtle', neon: ['bestSellers'], header: ['bar', 58, 100, 0], bottomNav: ['bar', 60, 100, 0], sidebar: ['square', 274, 100, 4] },
+    gold: { layout: [4, 3, 2, 2], logoWidth: 176, font: 'Noto Kufi Arabic', weight: 900, buttonRadius: 24, cardRadius: 24, shadow: 'medium', neon: ['hero', 'categories', 'bestSellers'], header: ['floating', 76, 92, 28], bottomNav: ['pill', 76, 88, 32], sidebar: ['royal', 300, 96, 40] },
+    silver: { layout: [5, 3, 2, 2], logoWidth: 168, font: 'IBM Plex Sans Arabic', weight: 800, buttonRadius: 12, cardRadius: 16, shadow: 'medium', neon: ['categories', 'bestSellers'], header: ['bar', 66, 100, 8], bottomNav: ['floating', 68, 94, 20], sidebar: ['glass', 286, 96, 28] },
+    copper: { layout: [4, 3, 2, 2], logoWidth: 160, font: 'Aref Ruqaa Ink', weight: 800, buttonRadius: 12, cardRadius: 24, shadow: 'medium', neon: ['purchase', 'categories'], header: ['floating', 70, 94, 24], bottomNav: ['pill', 72, 90, 28], sidebar: ['rounded', 284, 94, 36] },
+    ruby: { layout: [4, 2, 2, 1], logoWidth: 160, font: 'Rubik', weight: 900, buttonRadius: 24, cardRadius: 24, shadow: 'medium', neon: ['purchase', 'hero', 'bestSellers'], header: ['floating', 72, 92, 28], bottomNav: ['pill', 72, 90, 28], sidebar: ['aurora', 292, 96, 36] },
+    orchid: { layout: [3, 3, 2, 2], logoWidth: 160, font: 'Noto Sans Arabic', weight: 800, buttonRadius: 24, cardRadius: 24, shadow: 'subtle', neon: ['hero', 'categories'], header: ['floating', 74, 90, 32], bottomNav: ['pill', 74, 90, 32], sidebar: ['glass', 286, 92, 40] },
+    aurora: { layout: [4, 3, 2, 2], logoWidth: 168, font: 'Changa', weight: 800, buttonRadius: 12, cardRadius: 24, shadow: 'medium', neon: ['hero', 'categories', 'sidebar'], header: ['floating', 74, 92, 28], bottomNav: ['pill', 74, 90, 32], sidebar: ['aurora', 296, 96, 36] },
+    desert: { layout: [4, 2, 2, 1], logoWidth: 152, font: 'El Messiri', weight: 800, buttonRadius: 12, cardRadius: 16, shadow: 'subtle', neon: ['categories'], header: ['bar', 60, 100, 4], bottomNav: ['floating', 66, 94, 20], sidebar: ['rounded', 278, 94, 32] },
+    frost: { layout: [5, 3, 3, 2], logoWidth: 160, font: 'Noto Kufi Arabic', weight: 800, buttonRadius: 12, cardRadius: 16, shadow: 'medium', neon: ['hero', 'categories'], header: ['floating', 68, 94, 24], bottomNav: ['floating', 68, 92, 20], sidebar: ['glass', 280, 94, 28] },
+};
 const palettes = {
     classic: { light: ['#2563EB','#475569','#F59E0B','#FFFFFF','#F8FAFC','#0F172A','#475569','#CBD5E1'], dark: ['#60A5FA','#A78BFA','#FBBF24','#0F172A','#1E293B','#F8FAFC','#CBD5E1','#475569'] },
     midnight: { light: ['#1D4ED8','#334155','#D97706','#EFF6FF','#FFFFFF','#0F172A','#475569','#CBD5E1'], dark: ['#60A5FA','#A78BFA','#FBBF24','#0B1023','#17213A','#F8FAFC','#CBD5E1','#475569'] },
@@ -28,14 +49,14 @@ const palettes = {
 };
 const colorKeys = ['primary','secondary','accent','background','surface','text','mutedText','border'];
 const allowed = {
-    typography: { arabicFont: [...FREE_FONTS_AR, ...PRO_FONTS_AR], englishFont: [...FREE_FONTS_EN, ...PRO_FONTS_EN], baseSize: [14,16,18,20], headingWeight: [600,700,800] },
-    layout: { productsPerRow: [2, 3, 4, 5, 6], categoriesPerRow: [2, 3] },
+    typography: { arabicFont: [...FREE_FONTS_AR, ...PRO_FONTS_AR], englishFont: [...FREE_FONTS_EN, ...PRO_FONTS_EN], baseSize: [14,16,18,20], bodyWeight: [400,500,600,700,800], headingWeight: [600,700,800,900] },
+    layout: { productsPerRow: [2, 3, 4, 5, 6], categoriesPerRow: [2, 3], productsPerRowMobile: [1, 2, 3], categoriesPerRowMobile: [1, 2, 3] },
     buttons: { radius: [0,4,8,12,24], style: ['solid','outline'] },
     cards: { radius: [0,4,8,12,16,24], shadow: ['none','subtle','medium'] },
     navigation: { style: ['standard','compact'] },
     freeFonts: { arabic: FREE_FONTS_AR, english: FREE_FONTS_EN }, freePresets: FREE_PRESETS, proPresets: PRO_PRESETS,
 };
-const baseTypography = { arabicFont: 'Cairo', englishFont: 'Inter', baseSize: 16, headingWeight: 700 };
+const baseTypography = { arabicFont: 'Cairo', englishFont: 'Inter', baseSize: 16, bodyWeight: 400, headingWeight: 700 };
 const baseButtons = { radius: 8, style: 'solid' };
 const baseCards = { radius: 12, shadow: 'subtle' };
 const baseNavigation = { style: 'standard' };
@@ -89,11 +110,13 @@ function validateAppearance(value, path) {
     }
     const result = { presetId: value.presetId, colors };
     for (const section of ['typography','buttons','cards','navigation']) {
-        keysOnly(value[section],Object.keys(allowed[section]),`${path}.${section}`);
+        const sectionValue = section === 'typography' && value[section]?.bodyWeight === undefined
+            ? { ...value[section], bodyWeight: 400 } : value[section];
+        keysOnly(sectionValue,Object.keys(allowed[section]),`${path}.${section}`);
         result[section] = {};
         for (const [key,values] of Object.entries(allowed[section])) {
-            if (!values.includes(value[section][key])) invalid(`${path}.${section}.${key}`);
-            result[section][key] = value[section][key];
+            if (!values.includes(sectionValue[key])) invalid(`${path}.${section}.${key}`);
+            result[section][key] = sectionValue[key];
         }
     }
     const neon = value.neon === undefined ? baseNeon() : value.neon;
@@ -133,9 +156,15 @@ function validateTheme(value) {
     const modes = { light: validateAppearance(value.modes.light,'modes.light'), dark: validateAppearance(value.modes.dark,'modes.dark') };
     keysOnly(value.brand,['logoPath','logoWidth','slides','marqueeTextArabic','targetBannerPath','sidebarTemplate','sidebarMetrics'],'brand');
     const inputLayout = value.layout === undefined ? { productsPerRow: 4, categoriesPerRow: 3 } : value.layout;
-    keysOnly(inputLayout, ['productsPerRow', 'categoriesPerRow'], 'layout');
+    keysOnly(inputLayout, ['productsPerRow', 'categoriesPerRow', 'productsPerRowMobile', 'categoriesPerRowMobile'], 'layout');
     const layout = { productsPerRow: inputLayout.productsPerRow, categoriesPerRow: inputLayout.categoriesPerRow };
     if (![2, 3, 4, 5, 6].includes(layout.productsPerRow) || ![2, 3].includes(layout.categoriesPerRow)) invalid('layout');
+    for (const key of ['productsPerRowMobile', 'categoriesPerRowMobile']) {
+        if (inputLayout[key] !== undefined) {
+            if (![1, 2, 3].includes(inputLayout[key])) invalid(`layout.${key}`);
+            layout[key] = inputLayout[key];
+        }
+    }
     const { logoPath,logoWidth,slides } = value.brand;
     const targetBannerPath = value.brand.targetBannerPath === undefined ? null : value.brand.targetBannerPath;
     const marqueeTextArabic = value.brand.marqueeTextArabic === undefined
@@ -186,8 +215,55 @@ function validateTheme(value) {
 
 function preset(id) {
     if (!Object.hasOwn(palettes,id)) invalid('presetId');
-    return validateTheme({ schemaVersion: 2, modes: { light: appearance(id,'light'), dark: appearance(id,'dark') },
-        brand: { logoPath: null, logoWidth: 144, slides: [null,null,null,null], targetBannerPath: null } });
+    const design = presetDesigns[id] || presetDesigns.classic;
+    const modes = { light: appearance(id,'light'), dark: appearance(id,'dark') };
+    const [productsPerRow, categoriesPerRow, productsPerRowMobile, categoriesPerRowMobile] = design.layout;
+    const chrome = baseChrome();
+    const configuration = {
+        schemaVersion: 2,
+        modes,
+        brand: { logoPath: null, logoWidth: 144, slides: [null,null,null,null], targetBannerPath: null },
+        chrome,
+        layout: { productsPerRow, categoriesPerRow, productsPerRowMobile, categoriesPerRowMobile },
+    };
+
+    if (!FREE_PRESETS.includes(id)) {
+        configuration.brand.logoWidth = design.logoWidth;
+        for (const mode of ['light', 'dark']) {
+            const part = modes[mode];
+            part.typography = { ...part.typography, arabicFont: design.font, headingWeight: design.weight };
+            part.buttons = { ...part.buttons, radius: design.buttonRadius };
+            part.cards = { ...part.cards, radius: design.cardRadius, shadow: design.shadow };
+            for (const section of design.neon || []) {
+                part.neon[section] = { enabled: true, color: part.colors.accent, speed: section === 'hero' ? 8 : 5 };
+            }
+        }
+    }
+
+    if (ULTRA_PRESETS.includes(id)) {
+        const [headerTemplate, headerHeight, headerWidth, headerRadius] = design.header;
+        const [navTemplate, navHeight, navWidth, navRadius] = design.bottomNav;
+        const [sidebarTemplate, sidebarWidth, sidebarHeight, sidebarRadius] = design.sidebar;
+        for (const mode of ['light', 'dark']) {
+            const colors = modes[mode].colors;
+            chrome.modes[mode] = {
+                header: { template: headerTemplate, height: headerHeight, width: headerWidth,
+                    background: colors.surface, foreground: colors.text, accent: colors.primary, radius: headerRadius },
+                bottomNav: { template: navTemplate, height: navHeight, width: navWidth,
+                    background: colors.surface, foreground: colors.text, accent: colors.primary, radius: navRadius },
+            };
+        }
+        chrome.header = chrome.modes.light.header;
+        chrome.bottomNav = chrome.modes.light.bottomNav;
+        configuration.brand.sidebarTemplate = sidebarTemplate;
+        configuration.brand.sidebarMetrics = { width: sidebarWidth, height: sidebarHeight, radius: sidebarRadius };
+    }
+
+    return validateTheme(configuration);
+}
+
+function presetTier(id) {
+    return FREE_PRESETS.includes(id) ? 'FREE' : 'THEME_PRO';
 }
 
 function safeTheme(value) {
@@ -215,7 +291,7 @@ function assertPlanAllows(theme, plan = 'FREE') {
         for (const part of Object.values(theme.modes)) {
             const t = part.typography;
             if (!FREE_PRESETS.includes(part.presetId) || !FREE_FONTS_AR.includes(t.arabicFont)
-                || !FREE_FONTS_EN.includes(t.englishFont) || t.baseSize !== 16 || t.headingWeight !== 700
+                || !FREE_FONTS_EN.includes(t.englishFont) || t.baseSize !== 16
                 || JSON.stringify(part.buttons) !== JSON.stringify(baseButtons)
                 || JSON.stringify(part.cards) !== JSON.stringify(baseCards)
                 || JSON.stringify(part.navigation) !== JSON.stringify(baseNavigation)
@@ -234,4 +310,4 @@ function assertPlanAllows(theme, plan = 'FREE') {
     }
 }
 
-module.exports = { validateTheme,safeTheme,preset,allowed,assertPlanAllows,FREE_PRESETS,PRO_PRESETS,DEFAULT_MARQUEE_AR };
+module.exports = { validateTheme,safeTheme,preset,presetTier,allowed,assertPlanAllows,FREE_PRESETS,PRO_PRESETS,ULTRA_PRESETS,DEFAULT_MARQUEE_AR };

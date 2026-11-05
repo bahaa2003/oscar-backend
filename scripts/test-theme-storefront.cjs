@@ -175,7 +175,9 @@ async function main() {
     };
     await publish();
     assert.equal(publishRequests, 1); assert.equal(saveRequests, 1);
-    assert.deepEqual((await theme.published()).published.layout, { productsPerRow: 3, categoriesPerRow: 3 });
+    assert.deepEqual((await theme.published()).published.layout, {
+        productsPerRow: 3, categoriesPerRow: 3, productsPerRowMobile: 2, categoriesPerRowMobile: 2,
+    });
     await sibling.releaseThemeRead();
     await columns(sibling, '.platform-theme-category-grid', 3);
     pass('An already-open same-origin tab refreshes after broadcast and discards a delayed pre-publish response');
@@ -312,13 +314,16 @@ async function main() {
     assert.equal(computed.surface, 'rgb(239, 246, 255)'); assert.equal(computed.text, 'rgb(23, 37, 84)');
     assert.equal(computed.weight, '800'); assert(computed.font.includes('Tajawal')); assert.equal(computed.size, '18px');
     assert(await styledVisitor.$('#oscar-theme-font-tajawal'));
+    await styledVisitor.waitForFunction(() => document.querySelector('#oscar-theme-font-tajawal')?.sheet, { timeout: 15000 });
     assert(await styledVisitor.evaluate(async () => {
+        await document.fonts.ready;
         const faces = await document.fonts.load('18px Tajawal', 'اختبار الخط');
-        return faces.length > 0 && faces.every((face) => face.status === 'loaded');
-    }), 'The selected web font must actually download, not only appear in font-family.');
+        return { loaded: faces.length > 0 && faces.every((face) => face.status === 'loaded'),
+            faces: faces.map((face) => face.status), fontLinks: [...document.querySelectorAll('link[id^="oscar-theme-font-"]')].map((link) => link.href) };
+    }).then((result) => { assert(result.loaded, `The selected web font must actually download, not only appear in font-family: ${JSON.stringify(result)}`); return true; }));
     assert.equal(computed.headerHeight, 88); assert.equal(computed.headerWidth, '92%'); assert.equal(computed.headerBackground, 'rgb(29, 78, 216)', JSON.stringify(computed));
     assert.equal(computed.sidebarRadius, '40px'); assert.equal(computed.sidebarWidth, 300);
-    assert.equal(computed.categoryNeon, 'platform-neon-rotate'); assert.equal(computed.heroNeon, 'platform-neon-rotate');
+    assert.equal(computed.categoryNeon, 'platform-neon-orbit'); assert.equal(computed.heroNeon, 'platform-neon-orbit');
     await styledVisitor.waitForFunction((media) => [...document.images].some((img) => img.src.includes(media) && img.naturalWidth === 256), {}, uploaded.data.path);
     assert((await styledVisitor.content()).includes('رسالة اختبار الثيم المنشور'));
     pass('Real uploaded logo/slider, marquee, fonts, text size/weight, card color/radius/shadow, header dimensions/colors, sidebar dimensions and hero/category neon');
@@ -344,7 +349,7 @@ async function main() {
     });
     await customerPage.locator('.storefront-product-card').click();
     await customerPage.waitForSelector('[data-platform-purchase]');
-    await customerPage.waitForFunction(() => getComputedStyle(document.querySelector('[data-platform-purchase]'), '::before').animationName === 'platform-neon-rotate');
+    await customerPage.waitForFunction(() => getComputedStyle(document.querySelector('.purchase-neon-orbit-frame'), '::before').animationName === 'purchase-neon-border-orbit');
     const buy = await customerPage.$eval('[data-platform-button="primary"]', (el) => ({ radius: getComputedStyle(el).borderTopLeftRadius, background: getComputedStyle(el).backgroundColor }));
     assert.equal(buy.radius, '24px'); assert.equal(buy.background, 'rgba(0, 0, 0, 0)');
     await customerPage.evaluate(() => { localStorage.setItem('oscar-theme', 'dark'); });
