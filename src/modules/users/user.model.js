@@ -274,8 +274,9 @@ const userSchema = new mongoose.Schema(
         /**
          * creditUsed: the amount of the credit line currently drawn.
          *
-         * Real spendable formula:
-         *   available = walletBalance + (creditLimit - creditUsed)
+         * Spendable balance includes the credit limit. A negative walletBalance
+         * already reflects drawn credit; only independently recorded creditUsed
+         * reduces availability again.
          *
          * On order creation:
          *   - wallet is used first
@@ -380,7 +381,8 @@ userSchema.virtual('isActive').get(function () {
 userSchema.virtual('availableBalance').get(function () {
     const balance = this.walletBalance || 0;
     const credit = this.creditLimit || 0;
-    return parseFloat((balance + credit).toFixed(2));
+    const independentlyUsedCredit = Math.max(0, (this.creditUsed || 0) - Math.max(0, -balance));
+    return parseFloat((balance + credit - independentlyUsedCredit).toFixed(2));
 });
 
 /** How much credit remains available (undrawn). */

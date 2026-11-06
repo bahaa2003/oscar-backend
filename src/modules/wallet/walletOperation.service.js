@@ -268,7 +268,16 @@ const applyWalletOperation = async (operation, token, session = null) => {
     };
     if (operation.enforceAvailable) {
         filter.$expr = { $gte: [
-            { $add: ['$walletBalance', { $subtract: [{ $ifNull: ['$creditLimit', 0] }, { $ifNull: ['$creditUsed', 0] }] }] },
+            // A negative walletBalance already represents drawn credit. Only
+            // subtract creditUsed that is not reflected in that balance (older
+            // accounts can have such a separate creditUsed value).
+            { $subtract: [
+                { $add: [{ $ifNull: ['$walletBalance', 0] }, { $ifNull: ['$creditLimit', 0] }] },
+                { $max: [0, { $subtract: [
+                    { $ifNull: ['$creditUsed', 0] },
+                    { $max: [0, { $multiply: [-1, { $ifNull: ['$walletBalance', 0] }] }] },
+                ] }] },
+            ] },
             Math.abs(operation.delta),
         ] };
     }
