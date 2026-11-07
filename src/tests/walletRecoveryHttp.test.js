@@ -126,6 +126,28 @@ test('admin wallet debit endpoint deducts from remaining credit once and enforce
     expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey: finalKey })).toBe(1);
 });
 
+test('admin wallet debit accepts a stored balance with floating-point dust over HTTP', async () => {
+    const admin = await createAdmin();
+    const { customer } = await createCustomerWithGroup({
+        walletBalance: -52.470000000000006, creditLimit: 100, creditUsed: 52.47, currency: 'EGP',
+    });
+    const idempotencyKey = `admin-debit-legacy-decimal:${customer._id}`;
+    const response = await fetch(`${baseUrl}/api/admin/wallets/${customer._id}/deduct`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${jwt.sign({ id: String(admin._id) }, process.env.JWT_SECRET)}`,
+            'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify({ amount: 40, reason: 'Legacy decimal debit', idempotencyKey }),
+    });
+    expect(response.status).toBe(200);
+    const stored = await User.findById(customer._id);
+    expect(stored.walletBalance).toBe(-92.47);
+    expect(stored.creditUsed).toBe(92.47);
+    expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey })).toBe(1);
+});
+
 test('admin can add and deduct funds for a customer with an active credit limit and debt', async () => {
     const admin = await createAdmin();
     const { customer } = await createCustomerWithGroup({ walletBalance: -50, creditLimit: 100, creditUsed: 50, currency: 'USD' });

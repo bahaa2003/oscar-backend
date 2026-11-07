@@ -90,6 +90,24 @@ describe('purchases within an approved credit limit', () => {
 });
 
 describe('admin deductions against an approved credit limit', () => {
+    it('deducts from a legacy balance with floating-point dust without losing the credit limit', async () => {
+        const admin = await createAdmin();
+        const user = await createCustomer({
+            groupId: group._id,
+            walletBalance: -52.470000000000006,
+            creditLimit: 100,
+            creditUsed: 52.47,
+        });
+        expect((await User.findById(user._id)).walletBalance).toBe(-52.470000000000006);
+
+        await adminWalletService.deductFunds(user._id, 40, 'Precision debit', admin._id, `precision-debit:${user._id}`);
+        const stored = await User.findById(user._id);
+        expect(stored.walletBalance).toBe(-92.47);
+        expect(stored.creditUsed).toBe(92.47);
+        expect(stored.availableBalance).toBe(7.53);
+        expect(await WalletTransaction.countDocuments({ userId: user._id, type: 'DEBIT' })).toBe(1);
+    });
+
     it('deducts once, records the debit, and preserves the remaining credit for a customer purchase', async () => {
         const admin = await createAdmin();
         const user = await createCustomer({ groupId: group._id, walletBalance: -50, creditLimit: 100, creditUsed: 50 });

@@ -166,7 +166,11 @@ const deductFunds = async (userId, amount, reason, adminId, idempotencyKey = nul
     if (!user) throw new NotFoundError('User');
 
     const userCurrency = user.currency || 'USD';
-    const balanceBefore = safeRound(user.walletBalance || 0);
+    // Preserve the exact stored double for the compare-and-set reservation.
+    // Legacy balances can contain floating-point dust even though financial
+    // calculations and the UI correctly show two decimal places.
+    const storedBalanceBefore = Number(user.walletBalance || 0);
+    const balanceBefore = safeRound(storedBalanceBefore);
     const creditLimit = safeRound(Math.abs(Number(user.creditLimit || 0)));
     const creditUsedBefore = safeRound(user.creditUsed || 0);
     const independentlyUsedCredit = Math.max(0, creditUsedBefore - Math.max(0, -balanceBefore));
@@ -198,7 +202,7 @@ const deductFunds = async (userId, amount, reason, adminId, idempotencyKey = nul
         userId,
         idempotencyKey: stableAdminOperationKey(userId, 'DEDUCT', parsedAmount, reason, balanceBefore, idempotencyKey),
         operationType: 'ADMIN_DEBIT', transactionType: TRANSACTION_TYPES.DEBIT,
-        amount: parsedAmount, delta: -parsedAmount, targetBalance: balanceAfter, expectedBalance: balanceBefore,
+        amount: parsedAmount, delta: -parsedAmount, targetBalance: balanceAfter, expectedBalance: storedBalanceBefore,
         creditUsedAfter, enforceAvailable: true, currency: userCurrency, description: reason || `Admin manual debit (${userCurrency})`,
         actorId: adminId, actorRole: ACTOR_ROLES.ADMIN, eventType: OUTBOX_EVENT.ADMIN,
         auditAction: require('../audit/audit.constants').WALLET_ACTIONS.ADMIN_BALANCE_ADJUSTMENT,
