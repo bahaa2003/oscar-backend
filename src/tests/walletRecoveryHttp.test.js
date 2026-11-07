@@ -86,6 +86,85 @@ test('admin wallet credit endpoint replays an idempotent request without crediti
     expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey })).toBe(1);
 });
 
+test('admin wallet debit endpoint deducts from remaining credit once and enforces the limit over HTTP', async () => {
+    const admin = await createAdmin();
+    const { customer } = await createCustomerWithGroup({ walletBalance: -50, creditLimit: 100, creditUsed: 50, currency: 'USD' });
+    const path = `/api/admin/wallets/${customer._id}/deduct`;
+    const sendDebit = async (user, amount, key) => {
+        const headers = { 'Content-Type': 'application/json', 'Idempotency-Key': key };
+        if (user) headers.Authorization = `Bearer ${jwt.sign({ id: String(user._id) }, process.env.JWT_SECRET)}`;
+        const response = await fetch(`${baseUrl}${path}`, {
+            method: 'POST', headers,
+            body: JSON.stringify({ amount, reason: 'HTTP wallet debit verification', idempotencyKey: key }),
+        });
+        return { status: response.status, body: await response.json() };
+    };
+
+    const key = `admin-debit-http:${customer._id}`;
+    expect((await sendDebit(null, 20, key)).status).toBe(401);
+    expect((await sendDebit(customer, 20, key)).status).toBe(403);
+    expect((await sendDebit(admin, 20, key)).status).toBe(200);
+    expect((await sendDebit(admin, 20, key)).status).toBe(200);
+    let stored = await User.findById(customer._id);
+    expect(stored.walletBalance).toBe(-70);
+    expect(stored.creditUsed).toBe(70);
+    expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey: key })).toBe(1);
+
+    const denied = await sendDebit(admin, 30.01, `admin-debit-over-limit:${customer._id}`);
+    expect(denied.status).toBe(422);
+    stored = await User.findById(customer._id);
+    expect(stored.walletBalance).toBe(-70);
+    expect(stored.creditUsed).toBe(70);
+    expect(await WalletTransaction.countDocuments({ userId: customer._id, type: 'DEBIT' })).toBe(1);
+
+    const finalKey = `admin-debit-last-credit:${customer._id}`;
+    expect((await sendDebit(admin, 30, finalKey)).status).toBe(200);
+    expect((await sendDebit(admin, 30, finalKey)).status).toBe(200);
+    stored = await User.findById(customer._id);
+    expect(stored.walletBalance).toBe(-100);
+    expect(stored.creditUsed).toBe(100);
+    expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey: finalKey })).toBe(1);
+});
+
+test('admin can add and deduct funds for a customer with an active credit limit and debt', async () => {
+    const admin = await createAdmin();
+    const { customer } = await createCustomerWithGroup({ walletBalance: -50, creditLimit: 100, creditUsed: 50, currency: 'USD' });
+    const sendAdjustment = async (action, amount, key) => {
+        const response = await fetch(`${baseUrl}/api/admin/wallets/${customer._id}/${action}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${jwt.sign({ id: String(admin._id) }, process.env.JWT_SECRET)}`,
+                'Idempotency-Key': key,
+            },
+            body: JSON.stringify({ amount, reason: 'Admin credit-limit wallet verification', idempotencyKey: key }),
+        });
+        return { status: response.status, body: await response.json() };
+    };
+
+    const creditKey = `credit-debt:${customer._id}`;
+    const debitKey = `debit-debt:${customer._id}`;
+    expect((await sendAdjustment('add', 20, creditKey)).status).toBe(201);
+    expect((await sendAdjustment('add', 20, creditKey)).status).toBe(201);
+    let stored = await User.findById(customer._id);
+    expect(stored.walletBalance).toBe(-30);
+    expect(stored.creditUsed).toBe(30);
+    expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey: creditKey })).toBe(1);
+
+    expect((await sendAdjustment('deduct', 10, debitKey)).status).toBe(200);
+    expect((await sendAdjustment('deduct', 10, debitKey)).status).toBe(200);
+    stored = await User.findById(customer._id);
+    expect(stored.walletBalance).toBe(-40);
+    expect(stored.creditUsed).toBe(40);
+    expect(await WalletTransaction.countDocuments({ userId: customer._id, idempotencyKey: debitKey })).toBe(1);
+
+    expect((await sendAdjustment('add', 50, `credit-clear-debt:${customer._id}`)).status).toBe(201);
+    stored = await User.findById(customer._id);
+    expect(stored.walletBalance).toBe(10);
+    expect(stored.creditUsed).toBe(0);
+    expect(stored.creditLimit).toBe(100);
+});
+
 test('admin wallet credit treats a legacy null wallet reservation as unlocked', async () => {
     const admin = await createAdmin();
     const { customer } = await createCustomerWithGroup({ walletBalance: 25, currency: 'EGP' });

@@ -16,6 +16,7 @@ const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 const crypto = require('crypto');
 const { executeWalletOperation, OUTBOX_EVENT } = require('../wallet/walletOperation.service');
+const { WalletOperation } = require('../wallet/walletOperation.model');
 
 const MAX_ADJUSTMENT = 100_000;  // guard against fat-finger typos
 
@@ -145,7 +146,8 @@ const addFunds = async (userId, amount, reason, adminId, idempotencyKey = null) 
  * (the same currency as their walletBalance). No USD conversion is applied.
  *
  * CREDIT LIMIT ENFORCEMENT:
- *   available = walletBalance + (creditLimit - creditUsed)
+ *   A negative walletBalance already represents drawn credit; creditUsed is
+ *   deducted separately only when it exceeds that reflected debt.
  *   Deduction allowed only if: amount <= available
  *   newBalance = walletBalance - amount (can go negative up to -creditLimit)
  */
@@ -167,10 +169,16 @@ const deductFunds = async (userId, amount, reason, adminId, idempotencyKey = nul
     const balanceBefore = safeRound(user.walletBalance || 0);
     const creditLimit = safeRound(Math.abs(Number(user.creditLimit || 0)));
     const creditUsedBefore = safeRound(user.creditUsed || 0);
-    const availableCredit = safeRound(creditLimit - creditUsedBefore);
-    const totalAvailable = safeRound(balanceBefore + availableCredit);
+    const independentlyUsedCredit = Math.max(0, creditUsedBefore - Math.max(0, -balanceBefore));
+    const totalAvailable = safeRound(balanceBefore + creditLimit - independentlyUsedCredit);
+    const availableCredit = safeRound(totalAvailable - Math.max(0, balanceBefore));
 
-    if (parsedAmount > totalAvailable) {
+    // An explicit key may refer to a debit that already consumed the last
+    // available funds. Let the wallet operation validate and replay that key.
+    const existingOperation = idempotencyKey
+        ? await WalletOperation.exists({ idempotencyKey })
+        : null;
+    if (!existingOperation && parsedAmount > totalAvailable) {
         throw new BusinessRuleError(
             `Insufficient funds. Available: ${totalAvailable.toFixed(2)} ${userCurrency} ` +
             `(balance: ${balanceBefore.toFixed(2)}, available credit: ${availableCredit.toFixed(2)}).`,
@@ -181,12 +189,9 @@ const deductFunds = async (userId, amount, reason, adminId, idempotencyKey = nul
     // Calculate new balance and credit usage
     const balanceAfter = safeRound(balanceBefore - parsedAmount);
 
-    // If balance goes negative, the deficit is drawn from credit
-    let creditDrawn = 0;
-    if (balanceAfter < 0) {
-        // How much of the credit line is now being used
-        creditDrawn = safeRound(Math.min(Math.abs(balanceAfter), availableCredit));
-    }
+    // Only the additional negative balance consumes more of the credit line.
+    // Counting the full deficit again would double-count an existing debt.
+    const creditDrawn = safeRound(Math.max(0, -balanceAfter) - Math.max(0, -balanceBefore));
     const creditUsedAfter = safeRound(creditUsedBefore + creditDrawn);
 
     const result = await executeWalletOperation({
@@ -194,7 +199,7 @@ const deductFunds = async (userId, amount, reason, adminId, idempotencyKey = nul
         idempotencyKey: stableAdminOperationKey(userId, 'DEDUCT', parsedAmount, reason, balanceBefore, idempotencyKey),
         operationType: 'ADMIN_DEBIT', transactionType: TRANSACTION_TYPES.DEBIT,
         amount: parsedAmount, delta: -parsedAmount, targetBalance: balanceAfter, expectedBalance: balanceBefore,
-        creditUsedAfter, currency: userCurrency, description: reason || `Admin manual debit (${userCurrency})`,
+        creditUsedAfter, enforceAvailable: true, currency: userCurrency, description: reason || `Admin manual debit (${userCurrency})`,
         actorId: adminId, actorRole: ACTOR_ROLES.ADMIN, eventType: OUTBOX_EVENT.ADMIN,
         auditAction: require('../audit/audit.constants').WALLET_ACTIONS.ADMIN_BALANCE_ADJUSTMENT,
         auditMetadata: {

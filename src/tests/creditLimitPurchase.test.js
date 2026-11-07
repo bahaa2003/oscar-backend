@@ -2,12 +2,13 @@
 
 const { debitWalletAtomic } = require('../modules/wallet/wallet.service');
 const orderService = require('../modules/orders/order.service');
+const adminWalletService = require('../modules/admin/admin.wallet.service');
 const { Order } = require('../modules/orders/order.model');
 const { User } = require('../modules/users/user.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const {
     connectTestDB, disconnectTestDB, clearCollections,
-    createGroup, createCustomer, createProduct,
+    createGroup, createCustomer, createProduct, createAdmin,
 } = require('./testHelpers');
 
 let group;
@@ -84,6 +85,41 @@ describe('purchases within an approved credit limit', () => {
         const user = await createCustomer({ groupId: group._id, walletBalance: 0, creditLimit: 0, creditUsed: 0 });
         await expect(debitWalletAtomic({ userId: user._id, amount: 1, idempotencyKey: `no-limit:${user._id}` }))
             .rejects.toMatchObject({ code: 'INSUFFICIENT_FUNDS' });
+        expect(await WalletTransaction.countDocuments({ userId: user._id })).toBe(0);
+    });
+});
+
+describe('admin deductions against an approved credit limit', () => {
+    it('deducts once, records the debit, and preserves the remaining credit for a customer purchase', async () => {
+        const admin = await createAdmin();
+        const user = await createCustomer({ groupId: group._id, walletBalance: -50, creditLimit: 100, creditUsed: 50 });
+        const key = `admin-debit-credit:${user._id}`;
+
+        await adminWalletService.deductFunds(user._id, 20, 'Test admin debit', admin._id, key);
+        await adminWalletService.deductFunds(user._id, 20, 'Test admin debit', admin._id, key);
+        let stored = await User.findById(user._id);
+        expect(stored.walletBalance).toBe(-70);
+        expect(stored.creditUsed).toBe(70);
+        expect(stored.availableBalance).toBe(30);
+        expect(await WalletTransaction.countDocuments({ userId: user._id, type: 'DEBIT' })).toBe(1);
+
+        const product = await createProduct({ basePrice: 30 });
+        await orderService.createOrder({ userId: user._id, productId: product._id, quantity: 1, idempotencyKey: `after-admin-debit:${user._id}` });
+        stored = await User.findById(user._id);
+        expect(stored.walletBalance).toBe(-100);
+        expect(stored.creditUsed).toBe(100);
+        expect(stored.availableBalance).toBe(0);
+        expect(await WalletTransaction.countDocuments({ userId: user._id, type: 'DEBIT' })).toBe(2);
+    });
+
+    it('refuses to deduct beyond the remaining credit without changing balance or creating a debit', async () => {
+        const admin = await createAdmin();
+        const user = await createCustomer({ groupId: group._id, walletBalance: -50, creditLimit: 100, creditUsed: 50 });
+        await expect(adminWalletService.deductFunds(user._id, 50.01, 'Too much', admin._id, `admin-over-limit:${user._id}`))
+            .rejects.toMatchObject({ code: 'INSUFFICIENT_BALANCE' });
+        const stored = await User.findById(user._id);
+        expect(stored.walletBalance).toBe(-50);
+        expect(stored.creditUsed).toBe(50);
         expect(await WalletTransaction.countDocuments({ userId: user._id })).toBe(0);
     });
 });
